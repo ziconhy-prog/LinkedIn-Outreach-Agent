@@ -1,0 +1,34 @@
+# Secrets — never commit these
+.env
+.env.local
+.env.*.local
+
+# Node dependencies (reinstalled from package.json — no need to track)
+node_modules/
+
+# Playwright browser session / storage state
+# This is the logged-in LinkedIn session. Treat it like a credential.
+.auth/
+playwright/.auth/
+storageState.json
+storage-state.json
+user-data-dir/
+.playwright-session/
+playwright-user-data/
+
+# Local database (prospect data, drafts, threads — stays on this machine)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+
+# Logs
+*.log
+logs/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
