@@ -35,6 +35,8 @@ def cmd_init_db(_: argparse.Namespace) -> int:
         print(f"✅ Database initialized at {DB_PATH}")
     finally:
         conn.close()
+    from outreach.db import migrations
+    migrations.run()
     return 0
 
 
@@ -452,6 +454,43 @@ def _candidate_score(row: dict) -> int:
     return score
 
 
+def cmd_inbox(_: argparse.Namespace) -> int:
+    """List pending redraft requests queued via /redraft in Telegram."""
+    from outreach.db import migrations
+    migrations.run()
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.id, m.content, m.redraft_instruction, m.redraft_requested_at,
+                   p.name, p.company
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN prospects p ON t.prospect_id = p.id
+            WHERE m.redraft_instruction IS NOT NULL
+              AND m.status NOT IN ('sent', 'skipped')
+            ORDER BY m.redraft_requested_at ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        print("No pending redraft requests.")
+        return 0
+
+    print(f"Pending redraft requests: {len(rows)}\n")
+    for row in rows:
+        print(f"── Message {row['id']} | {row['name']} ({row['company'] or 'unknown'})")
+        print(f"   Requested: {row['redraft_requested_at']}")
+        print(f"   Instruction: {row['redraft_instruction']}")
+        print(f"   Current draft:")
+        print(f"   {row['content']}")
+        print(f"\n   To redraft: run `outreach prompt-opener-mini <prospect_id>` in Claude Code,")
+        print(f"   then save the new opener with `outreach save-opener <prospect_id> <file>`.\n")
+    return 0
+
+
 def cmd_dry_run_batch(args: argparse.Namespace) -> int:
     """Print a local pre-validation batch from the prospect database.
 
@@ -624,6 +663,9 @@ def main(argv: list[str] | None = None) -> int:
     p_so.add_argument("prospect_id", type=int)
     p_so.add_argument("file", help="Path to file containing the opener text")
     p_so.set_defaults(func=cmd_save_opener)
+
+    p_inbox = sub.add_parser("inbox", help="List pending redraft requests from Telegram")
+    p_inbox.set_defaults(func=cmd_inbox)
 
     p_dry = sub.add_parser(
         "dry-run-batch",
