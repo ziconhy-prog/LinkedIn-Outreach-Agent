@@ -157,13 +157,13 @@ def cmd_linkedin_profile(args: argparse.Namespace) -> int:
     print(f"Name:      {data.get('name') or '(unknown)'}")
     print(f"Headline:  {data.get('headline') or '(unknown)'}")
     print(f"Location:  {data.get('location') or '(unknown)'}")
-    posts = data.get("posts") or []
-    print(f"\nLast {len(posts)} posts:")
-    for i, post in enumerate(posts, 1):
-        preview = post.replace("\n", " ").strip()
+    activity = data.get("activity") or []
+    print(f"\nLast {len(activity)} activity items:")
+    for i, item in enumerate(activity, 1):
+        preview = item["text"].replace("\n", " ").strip()
         if len(preview) > 200:
             preview = preview[:200] + "…"
-        print(f"  {i}. {preview}")
+        print(f"  {i}. [{item['type']}] {preview}")
     return 0
 
 
@@ -257,13 +257,6 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
     print(template)
     print("\n---\n")
     print("## Prospect dossier")
-    raw = data["raw"]
-    # Prefer the typed activity list; fall back to flat posts for old DB rows.
-    linkedin_data = dict(raw)
-    if "activity" not in linkedin_data and "posts" in linkedin_data:
-        linkedin_data["activity"] = [
-            {"type": "post", "text": p} for p in linkedin_data["posts"]
-        ]
     dossier = {
         "name": data["name"],
         "company": data["company"],
@@ -272,7 +265,7 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
         "city": data["city"],
         "bni_chapter": data["bni_chapter"],
         "category": data["category"],
-        "linkedin": linkedin_data,
+        "linkedin": data["raw"],
     }
     print("```json")
     print(json.dumps(dossier, indent=2, ensure_ascii=False))
