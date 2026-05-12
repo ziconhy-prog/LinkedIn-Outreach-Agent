@@ -1,259 +1,408 @@
-# LinkedIn Outreach Automation — Claude Code Instructions
+# LinkedIn Outreach Automation — Agent Instructions
 
-## Project Overview
+## Read This First
 
-This project is a LinkedIn cold outreach automation for an AI training platform.
-It surfaces prospects, researches them, drafts personalized human-sounding
-messages, and handles reply conversations toward booking a meeting on Google
-Calendar. **The operator approves every message before it sends. The system
-never sends anything autonomously.**
+This project helps the founder run LinkedIn cold outreach for SkillTrainer AI.
+It surfaces prospects, gathers lightweight research, drafts human-sounding
+messages, and prepares reply/meeting workflows.
 
-For the full product spec, read `PRD.md` first.
+**The system is drafting and approval infrastructure. It is not an autonomous
+sender. No LinkedIn message, connection request, reply, reaction, or calendar
+booking confirmation may happen without the operator's explicit Telegram
+approval.**
+
+Before making product or implementation decisions, read:
+
+1. `files/PRD.md` — product requirements and rationale
+2. This file — implementation constraints and operating rules
+3. `README.md` — current user-facing setup/status
+
+When docs conflict, follow the stricter safety rule. If product behavior is
+unclear, ask before implementing.
 
 ## Operator Context
 
-The operator is a founder, **not a software engineer**. When working on this
-project:
-- Default to plain-English explanations of what you're doing and why
-- Walk through setup steps one at a time
-- Avoid jargon unless you also explain it
-- When you make architectural choices, briefly justify them in plain language
-- If a step requires the operator to do something outside the editor (install
-  something, sign into a service, paste a key somewhere), say so explicitly
-- Prefer simple, well-supported tools over clever or cutting-edge ones
+The operator is a founder, not a software engineer.
 
-## Critical Constraints
+When working on this project:
 
-### Compliance and account safety
-LinkedIn's Terms of Service prohibit automated interaction with the platform.
-This system mitigates that risk by being **drafting infrastructure only**:
+- Explain setup and tradeoffs in plain English.
+- Walk through outside-editor steps one at a time.
+- Say explicitly when the operator must sign into a service, paste a token, or
+  keep the Mac awake.
+- Prefer simple, well-supported local tools over clever or fragile systems.
+- Do not hide compliance, account-safety, or privacy tradeoffs.
 
-- **Never write code that sends a LinkedIn message, connection request, or reaction without an explicit human click.**
-- Never write code that auto-replies, auto-likes, or auto-connects.
-- All LinkedIn actions must route through an approval queue.
-- The system runs from the founder's real account at modest daily volume.
+## Non-Negotiable Rules
 
-If at any point a feature request would cross this line, flag it before implementing.
+### 1. Human Approval Before Any Send
 
-### Voice fidelity (read this before writing any message-generation code)
-The single most important quality bar in this project is that generated
-messages do not read as AI-written. The agent's output must sound like a real
-founder typing on their phone.
+Every outbound LinkedIn action must be gated by Telegram approval.
 
-**Forbidden patterns in generated messages:**
-- Em-dash-heavy rhythm
-- Tricolon openers (three parallel adjectives or clauses)
-- "I hope this message finds you well" or any variant
-- Overly polished symmetry between sentences
-- Buzzword stacking ("synergize," "leverage," "scalable," etc.)
-- Formal sign-offs ("Best regards," "Warm regards," "Looking forward to hearing")
-- Over-explaining or wall-of-text messages
-- Perfect grammar in every sentence
+Required:
 
-**Required patterns:**
-- Natural contractions (it's, you're, I'm, don't)
-- Occasional sentence fragments
+- Every opener, reply, follow-up, closer, and connection request goes to the
+  Telegram approval queue first.
+- The final send path accepts only a Telegram-approved queue/message ID.
+- The send path must reject raw message text.
+- The bot must show Approve & Send, Edit, Skip, and Defer controls for drafts.
+
+Forbidden:
+
+- Auto-sending messages, replies, reactions, or connection requests.
+- "Just this once" bypasses.
+- Sending from an in-Claude-Code prompt.
+- Any code path where the LLM can provide raw text directly to a send action.
+
+If the operator asks for autonomous sending, explain the account-safety risk
+and keep the Telegram approval gate.
+
+### 2. Claude Pro Only, No LLM APIs in v1
+
+All LLM work in v1 happens interactively inside Claude Code using the
+operator's Claude Pro subscription.
+
+Forbidden in v1:
+
+- Anthropic API calls, SDKs, raw HTTP calls, or `ANTHROPIC_API_KEY`.
+- OpenAI, Google, Azure OpenAI, or other paid LLM providers unless the operator
+  explicitly approves a v2 change with a documented cost cap.
+- Scheduled/background LLM calls.
+- Overnight/weekend drafting without the operator present.
+
+Allowed:
+
+- Scheduled prospect surfacing that does not call an LLM.
+- Local data gathering via Playwright MCP.
+- Prompt generation files that Claude Code reads during an interactive session.
+
+If the operator hits Claude Pro limits, pause cleanly and tell them to resume
+after the limit resets. Do not add an API fallback.
+
+### 3. LinkedIn Account Safety
+
+LinkedIn's terms prohibit automated platform interaction. The project reduces
+risk through modest volume, local browser sessions, audit logs, and human
+approval.
+
+Use Playwright MCP only from the operator's local machine and real logged-in
+session. Never ask for, store, transmit, or log LinkedIn passwords or 2FA codes.
+
+Allowed browser actions for v1:
+
+- Read profile
+- Read posts
+- Read comments
+- Read inbox
+- Search LinkedIn by name, then validate company/headline/location from the
+  result list
+- Send a Telegram-approved message
+- Send a Telegram-approved connection request
+
+Do not expose generic browser tools such as arbitrary page evaluation or
+free-form click/type control to the writing or reply path.
+
+Before LinkedIn runs:
+
+- Check the session is authenticated.
+- Abort if LinkedIn shows warnings, captcha, unusual-activity prompts, or
+  account restrictions.
+- Respect rate limits in code, not only in prompts.
+- Log actions locally without prospect names, message text, or full LinkedIn
+  URLs where avoidable.
+
+Starting hard caps until tuned with the operator:
+
+- Connection requests: max 15/day
+- Profile-view budget: max 80/day
+- Name search cost: 2 profile-view budget units
+- Messages sent: max 25/day
+- Add jitter/human pacing between browser actions
+
+### 4. Voice Fidelity
+
+Generated messages must sound like the founder typing naturally, not like a
+polished sales template.
+
+Voice source of truth:
+
+- Folder: `files/voice-samples/`
+- Current format: 20 `.rtf` files
+- The writing flow must read these samples for every drafting session.
+
+Forbidden message patterns:
+
+- "I hope this message finds you well" or variants
+- Heavy em-dash rhythm
+- Tricolon openers
+- Overly polished sentence symmetry
+- Buzzword stacking
+- Formal sign-offs like "Best regards" or "Warm regards"
+- Hard pitch on first contact
+- Wall-of-text explanations
+- Perfectly corporate grammar in every sentence
+
+Required message patterns:
+
+- Natural contractions
 - One core thought per message
-- Small imperfections — the kind a human leaves in
-- Low-friction asks at the end of openers (a question, a reaction prompt, never a hard pitch)
+- Small human imperfections
+- Short, phone-typed feel
+- Low-friction ask at the end of openers
+- Hook-led opening: a sharp observation, pattern, or mild point of view before
+  asking anything.
+- Relaxed, approachable rhythm. It should feel like a real LinkedIn chat, not
+  a discovery-call script.
+- Questions should create curiosity or invite a quick opinion, not sound like a
+  checklist.
+- Research-led hook selection: recent posts, comments, reposts, or engagement
+  are the preferred hook source when they are useful. If not, fall back to the
+  profile/company/category, then to a role-specific market truth.
 
-When you build the prompt for the writing agent, include negative examples (the
-forbidden patterns above) and positive examples (sample messages from the
-operator). Test outputs against these explicitly.
+Audience angle:
 
-### Human-in-the-loop is non-negotiable
-Every message — opener, reply, follow-up — goes through an approval queue
-before sending. Even when the user asks for "just send it automatically for
-this one," push back. This rule is the entire safety story of the project.
+- v1 targets BNI Malaysia members and adjacent Malaysia/SEA prospects in
+  IT/software, training, marketing, HR, and consulting.
+- Do not mention or pitch SkillTrainer AI on first contact.
+- Do not mention BNI or reveal that the prospect came from a BNI/source list in
+  the opener.
+- Ease into AI rollouts, training challenges, workforce readiness, and
+  practical business curiosity only when it follows naturally from the
+  prospect's own profile/posts.
+- Research process before drafting:
+  1. Read visible recent posts, comments, reposts, and engagement if available.
+  2. Look for suitable business hooks: client/team problems, productivity,
+     hiring, training, marketing pressure, operations, customer experience, AI
+     adoption, or workflow change.
+  3. If a suitable recent activity hook exists, use it lightly in the opener.
+  4. If recent activity is missing, generic, too personal, or not relevant,
+     use a profile/company/category hook.
+  5. If profile data is thin, use a founder-to-founder market-truth hook.
+- Do not force a recent-post reference. A weak post hook is worse than a strong
+  market-truth hook.
+- Hard evidence rule: never say "saw your post", "noticed your post", "your
+  recent post", or refer to a specific comment/repost unless Playwright
+  research actually captured that post/comment/repost/engagement. If no
+  suitable activity was captured, use profile/company/category or market-truth
+  hooks without implying a post was seen.
+- Prefer a soft peer-to-peer opener about what the prospect is building,
+  seeing, or focused on, but lead with a hook instead of a plain question.
+- Avoid boring "are clients asking for X or Y" interview-style openers unless
+  there is a genuinely interesting angle behind it.
+- Good openers can lightly name a tension the prospect probably feels:
+  "Everyone wants faster content now, but half the battle is still making it
+  sound like the brand", "Feels like hiring is the easy part compared with
+  getting people productive", or "Most teams say they want AI, then freeze when
+  it touches the actual workflow."
+- The objective is consultative sales: qualify the prospect, introduce the
+  training platform into their workforce context, and secure a face-to-face
+  meeting with a potential paying client.
+- Replies 1–2 should stay curious and open-ended, but they must not feel like
+  an interrogation. Use light reactions, small opinions, and natural follow-ups
+  to uncover business need, team size/context, AI adoption friction, training
+  gaps, or urgency.
+- Replies 3–4 may gradually introduce that Zico works on practical AI training
+  only if the conversation naturally points to AI adoption, team readiness, or
+  implementation friction.
+- When introducing SkillTrainer AI, connect it directly to the pain surfaced in
+  the conversation: practical workforce training, real workflows, team
+  consistency, faster execution, and less random AI usage. Do not switch into a
+  generic pitch.
+- Once relevant pain or interest is shown, steer toward a face-to-face meeting
+  rather than a vague "compare notes" conversation.
 
-### Reply timing
-The conversational agent must wait a varied, humanlike interval (typically 20
-minutes to a few hours, depending on time of day) before drafting a reply. It
-is never instant. When implementing this, randomize within sensible bounds and
-respect Malaysian business hours (UTC+8).
+Escalate instead of drafting when the prospect asks about pricing, contracts,
+refunds, SLAs, data/privacy, security, or anything commercially binding.
 
-### LLM usage — Pro subscription only, no API in v1 (hard rule)
-This project runs **entirely on the operator's Claude Pro subscription** for
-all LLM work. There is no Anthropic API key in v1, and no scheduled or
-background LLM calls.
+Prospect-fit check before drafting:
 
-What this means for how you build:
+- Search LinkedIn by name first, then inspect results for company/headline fit.
+- Do not rely on name match alone.
+- Confirm the profile is Malaysia/SEA-based or clearly tied to the BNI Malaysia
+  row.
+- Reject the candidate if the best LinkedIn match is outside Malaysia/SEA
+  (for example Dubai, UK, US, EU) unless the BNI row itself clearly proves they
+  are operating in Malaysia/SEA.
+- Default away from AI-provider companies, AI automation agencies, AI chatbot
+  vendors, AI training providers, and other businesses that sound like direct
+  competitors or implementation partners. They are usually poor first-priority
+  paying-client prospects.
+- Prioritize non-AI companies with teams or client-facing operations that could
+  benefit from practical workforce AI training: marketing/creative agencies,
+  HR consultancies, training companies, professional services, retail/service
+  businesses, and conventional SMEs.
+- If current company/headline/location cannot be matched with reasonable
+  confidence, mark as uncertain and pick another prospect. Do not draft.
+- For a requested dry run of N prospects, stop searching once N valid prospects
+  are selected.
 
-- **Do not write code that calls the Anthropic API directly.** No
-  `@anthropic-ai/sdk`, no `anthropic` Python package, no raw HTTP calls to
-  api.anthropic.com.
-- **Do not add `ANTHROPIC_API_KEY` to `.env` or any config file.** If the
-  operator pastes one in by mistake, flag it and remove it.
-- **Do not add other paid LLM providers** (OpenAI, Google, Azure OpenAI,
-  etc.) without an explicit operator decision and a documented cost cap.
-- **The 10am scheduled job does only:** prospect surfacing via Playwright
-  MCP, scoring/ranking, writing the day's list to local storage, and
-  notifying the operator that the queue is ready. No LLM calls of any kind.
-- **All research, drafting, and reply generation happens interactively**
-  inside Claude Code, when the operator is present and working the queue.
-  Claude Code uses the operator's Pro subscription automatically.
-- **Pro 5-hour limits apply.** If the operator hits the limit mid-session,
-  pause cleanly and tell the operator when limits reset. Don't error out and
-  don't try to fall back to an API.
+### 5. Privacy and Data Protection
 
-Practical implications for the codebase:
+Prospect data is third-party personal data. Treat it accordingly.
 
-- The "drafting module" is not a service that runs on its own. It's a set of
-  prompts and reference files (voice samples, brief format) that Claude Code
-  reads in-session to generate drafts.
-- The "research module" similarly: gather data with Playwright MCP and
-  store it locally; the LLM synthesis happens when the operator opens the
-  prospect in Claude Code.
-- The "reply agent" is also operator-triggered. When a prospect replies,
-  the system queues the reply for the operator to review next time they
-  open Claude Code. The "humanlike delay before drafting" still applies —
-  but the delay is between when the reply arrives and when it appears in
-  the operator's queue, not when an autonomous agent drafts it.
+Required:
 
-If the operator ever asks to "automate this so it runs overnight" or
-"connect an API key so it can draft without me," push back and refer them to
-the v2 conditions in the PRD. Don't quietly add the capability.
+- Collect only data needed for outreach decisions.
+- Store data locally in SQLite unless the operator explicitly approves another
+  private storage option.
+- Rely on macOS FileVault for encryption at rest; verify it before storing real
+  prospect data on a new machine.
+- Keep `.env`, OAuth tokens, Telegram tokens, and Playwright session paths out
+  of git and logs.
+- Use internal IDs in logs instead of names, URLs, or message content.
+- Check do-not-contact before surfacing, drafting, or sending.
+- Provide a manual deletion path for any prospect.
 
-### Playwright MCP — browser automation rules
-This project uses **Playwright MCP** as the LinkedIn access mechanism. Treat
-the browser-driving capability as powerful and constrained:
+Retention:
 
-- **Local only.** Playwright MCP runs on the operator's machine. Never propose
-  cloud-hosted browser sessions or shipping the founder's logged-in profile to
-  a remote server.
-- **No credentials in code.** The agent uses an existing browser session the
-  operator has logged into manually. Never ask for, store, or transmit
-  LinkedIn passwords or 2FA codes.
-- **Allowed-actions list.** Only expose specific, narrowly-scoped tools to the
-  agent: read a profile, read posts, read inbox, draft a message, send an
-  approved message ID. Do not expose generic "click anywhere / type anywhere"
-  capabilities to the LLM.
-- **Rate limits at the tool layer.** Enforce daily/hourly caps in code, not in
-  prompts. Hard limits should sit below LinkedIn's known soft thresholds.
-  Suggested starting points (to be tuned with the operator before going live):
-  - Connection requests: ≤ 15/day
-  - Profile views: ≤ 80/day
-  - Messages sent: ≤ 25/day
-  - Random jitter between actions (humanlike pacing)
-- **Audit trail.** Every Playwright MCP action is logged with timestamp, action
-  type, and target. Logs are kept locally and reviewable by the operator.
-- **Sending requires approval queue ID.** The "send message" tool must take a
-  reference to a queue entry the operator has approved — it must not accept
-  raw message text. This makes it structurally impossible for the agent to
-  send something the operator hasn't seen.
-- **Session health checks.** Before any run, verify the browser session is
-  authenticated and the account shows no warnings. Abort if anything looks off.
+- Keep active-thread data while the thread is open.
+- After meeting booked, declined, ghosted > 90 days, or do-not-contact request,
+  delete research/draft content and keep only minimal duplicate-prevention or
+  do-not-contact records.
 
-### Data protection and privacy (read before writing any data-handling code)
-Prospect data is personal data of third parties. Treat it accordingly.
+When in doubt, follow the strictest likely regime: Malaysia PDPA, Singapore
+PDPA, EU/UK GDPR.
 
-- **Minimize collection.** Pull only what the research module actually uses.
-  Don't scrape entire profiles "just in case."
-- **Local-first storage.** Prospect data, drafts, threads, and research stay
-  in a local database (e.g., SQLite) or a private database under the
-  operator's control. No third-party CRMs, analytics tools, or "send to a
-  cloud spreadsheet" shortcuts in v1.
-- **Encryption at rest.** Whatever database is chosen must support encryption
-  at rest. Configure it; don't skip it.
-- **No prospect data in logs.** Logs may reference prospects by internal ID,
-  not by name, profile URL, or message content. If you need to debug
-  message-quality issues, route the offending content through a separate
-  reviewable artifact, not the standard log stream.
-- **LLM privacy.** When sending prospect content to the LLM for research or
-  drafting, use a provider with a documented zero-retention or no-training
-  policy (Anthropic API has settings for this — verify and enable). Never
-  send full unredacted profile dumps if a summary suffices.
-- **Retention policy.** Active prospects: kept while the thread is open.
-  Closed prospects (meeting booked, declined, or silent > 90 days): research
-  and drafts deleted, only a minimal duplicate-prevention record kept.
-- **Do-not-contact list.** If a prospect asks not to be contacted, mark them
-  permanently do-not-contact and delete their research data. The system must
-  check this list before surfacing or acting on any prospect.
-- **Deletion on request.** Build a simple manual command from day one that
-  takes a prospect identifier and removes all data associated with them.
-- **Secrets handling.** API keys, session paths, and any auth tokens live in
-  `.env`. `.env` is in `.gitignore`. Never commit it. Never log its values.
-  Never paste it into chat outputs.
-- **Jurisdictional awareness.** Prospects in Malaysia are covered by PDPA;
-  prospects in EU jurisdictions by GDPR; prospects in Singapore by their PDPA.
-  When in doubt, default to the strictest applicable standard.
+## Product Workflow
 
-## Architecture (high level — fill in as we build)
+### Current v1 Direction
 
-- **Scheduler:** runs daily at 10:00 AM Malaysia time (UTC+8). Surfaces
-  prospects only — does **not** make LLM calls.
-- **Prospect sourcing:** LinkedIn Sales Navigator via **Playwright MCP** (local browser automation)
-- **Research module:** data gathering via Playwright MCP and web search;
-  LLM synthesis happens interactively in Claude Code on the operator's Pro subscription
-- **Writing module:** prompts and voice references that Claude Code reads
-  in-session; no standalone service, no API calls
-- **Approval queue:** CLI-style review flow rendered inside the Claude Code session (v1). Local-only, no third-party services. May graduate to a local web app in v2 if needed.
-- **Calendar integration:** Google Calendar API for availability and event creation
-- **Storage:** local encrypted database (SQLite with encryption, or similar)
-  for prospects, drafts, threads, status
-- **MCP servers used:** Playwright MCP (browser), Google Calendar MCP or direct API (calendar)
-- **LLM:** Claude Pro subscription, accessed via Claude Code only. No API in v1.
+The operator should stay close to research and drafting. The 10am automation
+surfaces prospects only. Research synthesis and message drafting happen when
+the operator is present in Claude Code.
 
-## Conventions (to fill in as decisions are made)
+Daily flow:
 
-- Language: TBD (likely Python or TypeScript — discuss with operator before choosing)
-- Secrets: stored in a `.env` file at project root; never committed; never logged
-- Logs: should never include full prospect names, message content, or LinkedIn URLs in plain text where avoidable
-- Commits: use conventional commits (feat:, fix:, docs:, chore:)
+1. Surface candidates from the BNI list and hashtag stream.
+2. Enrich selected candidates with LinkedIn URLs.
+3. Score/rank using cheap signals.
+4. Write the day's queue locally.
+5. Notify Telegram that the queue is ready.
+6. When the operator is present, Claude Code gathers research and drafts.
+7. Telegram approval gates every send.
 
-## Commands
+No LLM call belongs in the scheduled surfacing job.
 
-To be added as the project develops. Examples we'll likely have:
-- A command to dry-run the daily prospect surfacing
-- A command to test a single prospect end-to-end
-- A command to generate a sample opener against a test profile
+### Conversation Rules
+
+- Never send two outbound messages to a non-responding prospect on the same
+  calendar day.
+- Opener + one follow-up only.
+- Follow-up waits at least one day after the opener.
+- If no reply one day after follow-up, close as ghosted.
+- Polite "no thanks" gets a short closer for approval, then close.
+- Aggressive negative or do-not-contact request gets no draft; flag NEEDS YOU,
+  mark do-not-contact, and delete research data.
+- Inbound after closure reopens the thread.
+
+Reply handling:
+
+- Detect inbound messages without LLM drafting.
+- Apply a varied humanlike delay before surfacing the reply for drafting.
+- Respect Malaysia business hours (UTC+8).
+- Escalate ambiguous/commercial/sensitive messages instead of drafting.
+
+### Google Calendar Rules
+
+- Setup is through `/connect-calendar`.
+- Store OAuth token paths in `.env`; do not commit tokens.
+- Wait for the prospect to suggest a time.
+- Check the operator's calendar free/busy.
+- Do not proactively propose slots unless responding to a suggested time.
+- Do not invite the prospect by email in v1.
+- On approval, send the LinkedIn confirmation and create a block-only event on
+  the operator's calendar.
+- Event title: `LinkedIn meeting - [Prospect Name] (re: [hook])`
+- Event description includes the LinkedIn thread URL.
+
+## Architecture
+
+Use the current codebase patterns unless there is a clear reason to change.
+
+Current implemented foundation:
+
+- Language: Python
+- Local database: SQLite at `data/outreach.db`
+- Voice samples: `files/voice-samples/`
+- Prompts: `prompts/research_brief.md`, `prompts/opener.md`
+- BNI source data: files under `data/`
+- LinkedIn browser/session support: `outreach/linkedin/`
+- Rate limits: `outreach/rate_limiter.py`
+- Draft storage: `messages` table with Telegram approval pending
+
+Planned components:
+
+- Scheduler: daily 10:00 AM Malaysia time; prospect surfacing only
+- Prospect sourcing: BNI list plus hashtag discovery; Sales Navigator is not
+  used in v1
+- Research module: gathers local/LinkedIn data; Claude Code synthesizes briefs
+  interactively
+- Writing module: prompt/reference flow, not a standalone LLM service
+- Telegram cockpit: private bot, operator-only allowlist
+- Send tool: queue-ID only, no raw text
+- Calendar integration: Google Calendar block-only events
+- Retention/deletion commands: required before live operation at scale
 
 ## Key Files
 
-- `PRD.md` — full product requirements and rationale (read this for context on any feature decision)
-- `CLAUDE.md` — this file
-- `.env.example` — required environment variables (to be created)
-- `voice-samples/` — folder of real messages the founder has written, used as
-  voice reference for the writing module (to be populated)
+- `files/PRD.md` — full product spec
+- `files/CLAUDE.md` — this instruction file
+- `README.md` — operator-facing overview and current status
+- `.env.example` — expected environment variables
+- `.env` — local secrets only; never commit
+- `files/voice-samples/` — founder voice references
+- `prompts/` — Claude Code drafting/research prompt templates
+- `outreach/` — Python package
+- `data/outreach.db` — local database
+- `logs/` — local logs; no sensitive prospect content
 
-## Out of Scope (don't suggest these unless asked)
+## Implementation Guidance
 
-- Email outreach
-- Other channels (X, Instagram, WhatsApp)
-- Multi-operator features
-- Built-in CRM
-- Any form of auto-sending
-- Analytics dashboards beyond basic counts
+When adding features:
 
-## When the Operator Asks for Something Risky
+1. Read the PRD section for the feature.
+2. Check existing code and database schema first.
+3. Preserve the human approval gate structurally, not just in prompts.
+4. Add tests or dry-run commands for risky behavior.
+5. Keep logs privacy-safe.
+6. Prefer dry-run before live LinkedIn actions.
+7. Explain operator setup steps plainly.
 
-If a request would:
-- Auto-send any message
-- Bypass the approval queue
+Do not implement live sending until all of these exist:
+
+- Telegram operator allowlist
+- Approval queue with immutable queue/message IDs
+- Send function rejects raw text
+- Rate limiter and audit log are active
+- Session health check is active
+- Dry-run has been reviewed with the operator
+
+## Risky Requests
+
+Stop and explain the risk before proceeding if a request would:
+
+- Auto-send or bypass Telegram approval
+- Add API-backed or background LLM drafting
+- Add `ANTHROPIC_API_KEY` or another LLM provider
 - Increase LinkedIn volume beyond conservative caps
-- Store credentials insecurely or pass LinkedIn passwords through the agent
-- Run Playwright MCP against a cloud-hosted or shared browser session
-- Expose generic "click anywhere / type anywhere" browser tools to the LLM
-- Send unredacted prospect data to a third-party service that isn't the
-  approved LLM provider
-- Skip encryption, retention limits, or do-not-contact checks
-- Skip the voice-fidelity checks
-- Add an Anthropic API key, third-party LLM provider, or any background/
-  scheduled LLM call (v1 is operator-in-the-loop, Pro only)
-- "Automate" any drafting step so it runs without the operator present
+- Store credentials insecurely
+- Use a cloud/shared browser session
+- Expose generic browser controls to writing/reply logic
+- Allow non-operator Telegram users
+- Send calendar invites to prospects
+- State pricing or commercial commitments
+- Skip do-not-contact, deletion, retention, or privacy checks
+- Log prospect names, URLs, message content, or secrets
 
-…stop and explain the risk in plain English before doing it. Suggest a safer
-alternative. The operator has explicitly asked for this safety net.
+Offer the nearest safe alternative.
 
-## Open Questions to Resolve Before Building
+## Open Decisions
 
-1. ~~How will the system access Sales Navigator data?~~ → **Resolved:** Playwright MCP (local browser automation against the founder's logged-in session).
-2. ~~Where does the approval queue live?~~ → **Resolved:** CLI-style review flow inside the Claude Code session itself for v1. Keeps prospect data local, no extra services to build or maintain. Revisit local web app in v2 if review ergonomics justify it.
-3. What's the founder's voice baseline? Need 20+ sample messages from the founder to ground the writing module.
-4. What's the budget tolerance for LLM costs per prospect?
-5. What's the contingency if the LinkedIn account is restricted?
-6. Which local database for storage? (SQLite with SQLCipher is a strong default — confirm with operator.)
-7. Concrete starting numbers for daily/hourly Playwright MCP rate limits — confirm with operator before first live run.
-8. Confirm Anthropic API zero-retention settings are enabled for prospect data calls.
+Resolve these before live operation:
 
-Resolve these before writing significant code. They drive the architecture.
+- Backup plan if LinkedIn restricts the account
+- Final hourly/daily Playwright caps after early testing
+- Hashtag list after first 30 days of results
+- Exact voice-fidelity scorecard for approving drafts
+- Criteria for any post-v1 move from Claude Pro interactive drafting to API
+  automation

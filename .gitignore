@@ -27,6 +27,19 @@ playwright-user-data/
 *.log
 logs/
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Local data (DB, BNI PDF, anything operator drops in)
+data/
+
+# Playwright MCP runtime artifacts (already created during session)
+.playwright-mcp/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
