@@ -383,8 +383,6 @@ def _candidate_score(row: dict) -> int:
 
 def cmd_inbox(_: argparse.Namespace) -> int:
     """List pending redraft requests queued via /redraft in Telegram."""
-    from outreach.db import migrations
-    migrations.run()
     conn = get_connection()
     try:
         rows = conn.execute(
