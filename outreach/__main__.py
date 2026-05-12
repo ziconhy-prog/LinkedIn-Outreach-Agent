@@ -242,7 +242,11 @@ def cmd_show_research(args: argparse.Namespace) -> int:
 
 
 def cmd_prompt_brief(args: argparse.Namespace) -> int:
-    """Print the full prompt for synthesizing a brief, ready for Claude Code."""
+    """Print the prompt for synthesizing a brief, ready for Claude Code.
+
+    With ``--mini``, prints only the prospect dossier JSON, assuming the
+    template + rules are already in the caller's context from an earlier run.
+    """
     data = research.get_research(args.prospect_id)
     if not data:
         print(f"❌ Prospect {args.prospect_id} not found.")
@@ -251,12 +255,6 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
         print(f"❌ No research data yet. Run `outreach research {args.prospect_id}` first.")
         return 1
 
-    template = (PROJECT_ROOT / "prompts" / "research_brief.md").read_text(
-        encoding="utf-8"
-    )
-    print(template)
-    print("\n---\n")
-    print("## Prospect dossier")
     dossier = {
         "name": data["name"],
         "company": data["company"],
@@ -267,6 +265,17 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
         "category": data["category"],
         "linkedin": data["raw"],
     }
+
+    if args.mini:
+        print(json.dumps(dossier, indent=2, ensure_ascii=False))
+        return 0
+
+    template = (PROJECT_ROOT / "prompts" / "research_brief.md").read_text(
+        encoding="utf-8"
+    )
+    print(template)
+    print("\n---\n")
+    print("## Prospect dossier")
     print("```json")
     print(json.dumps(dossier, indent=2, ensure_ascii=False))
     print("```")
@@ -274,7 +283,12 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
 
 
 def cmd_prompt_opener(args: argparse.Namespace) -> int:
-    """Print the full prompt for drafting an opener, ready for Claude Code."""
+    """Print the prompt for drafting an opener, ready for Claude Code.
+
+    With ``--mini``, prints only prospect basics + research brief, assuming
+    the template, voice rules, and voice samples are already in the caller's
+    context from an earlier run.
+    """
     data = research.get_research(args.prospect_id)
     if not data:
         print(f"❌ Prospect {args.prospect_id} not found.")
@@ -286,9 +300,11 @@ def cmd_prompt_opener(args: argparse.Namespace) -> int:
         )
         return 1
 
-    template = (PROJECT_ROOT / "prompts" / "opener.md").read_text(encoding="utf-8")
-    print(template)
-    print("\n---\n")
+    if not args.mini:
+        template = (PROJECT_ROOT / "prompts" / "opener.md").read_text(encoding="utf-8")
+        print(template)
+        print("\n---\n")
+
     print("## Prospect basics")
     print(f"- Name: {data['name']}")
     print(f"- Company: {data['company']}")
@@ -297,63 +313,14 @@ def cmd_prompt_opener(args: argparse.Namespace) -> int:
     print()
     print("## Research brief")
     print(data["brief_md"])
-    print()
-    samples = load_voice_samples()
-    print(f"## Voice samples ({len(samples)} from voice-samples/)")
-    for i, sample in enumerate(samples, 1):
-        print(f"\n### Sample {i}")
-        print(sample)
-    return 0
 
-
-def cmd_prompt_brief_mini(args: argparse.Namespace) -> int:
-    """Print ONLY the prospect dossier JSON. Assumes the template + rules
-    are already in the caller's context from an earlier `prompt-brief` run.
-    """
-    data = research.get_research(args.prospect_id)
-    if not data:
-        print(f"❌ Prospect {args.prospect_id} not found.")
-        return 1
-    if not data["raw"]:
-        print(f"❌ No research data yet. Run `outreach research {args.prospect_id}` first.")
-        return 1
-    dossier = {
-        "name": data["name"],
-        "company": data["company"],
-        "profession": data["profession"],
-        "area": data["area"],
-        "city": data["city"],
-        "bni_chapter": data["bni_chapter"],
-        "category": data["category"],
-        "linkedin": data["raw"],
-    }
-    print(json.dumps(dossier, indent=2, ensure_ascii=False))
-    return 0
-
-
-def cmd_prompt_opener_mini(args: argparse.Namespace) -> int:
-    """Print ONLY prospect basics + research brief. Assumes the template,
-    voice rules, and 20 voice samples are already in the caller's context
-    from an earlier `prompt-opener` run.
-    """
-    data = research.get_research(args.prospect_id)
-    if not data:
-        print(f"❌ Prospect {args.prospect_id} not found.")
-        return 1
-    if not data["brief_md"]:
-        print(
-            f"❌ No brief yet. Run `outreach prompt-brief {args.prospect_id}` "
-            f"and save with `save-brief` first."
-        )
-        return 1
-    print("## Prospect basics")
-    print(f"- Name: {data['name']}")
-    print(f"- Company: {data['company']}")
-    if data["raw"] and data["raw"].get("headline"):
-        print(f"- Headline: {data['raw']['headline']}")
-    print()
-    print("## Research brief")
-    print(data["brief_md"])
+    if not args.mini:
+        print()
+        samples = load_voice_samples()
+        print(f"## Voice samples ({len(samples)} from voice-samples/)")
+        for i, sample in enumerate(samples, 1):
+            print(f"\n### Sample {i}")
+            print(sample)
     return 0
 
 
@@ -627,25 +594,21 @@ def main(argv: list[str] | None = None) -> int:
 
     p_pb = sub.add_parser("prompt-brief", help="Print the prompt for generating a brief")
     p_pb.add_argument("prospect_id", type=int)
+    p_pb.add_argument(
+        "--mini",
+        action="store_true",
+        help="Print only the dossier (use after the full prompt was sent once this session)",
+    )
     p_pb.set_defaults(func=cmd_prompt_brief)
 
     p_po = sub.add_parser("prompt-opener", help="Print the prompt for drafting an opener")
     p_po.add_argument("prospect_id", type=int)
+    p_po.add_argument(
+        "--mini",
+        action="store_true",
+        help="Print only basics + brief (use after the full prompt was sent once this session)",
+    )
     p_po.set_defaults(func=cmd_prompt_opener)
-
-    p_pbm = sub.add_parser(
-        "prompt-brief-mini",
-        help="Print only the dossier (use after prompt-brief was run once this session)",
-    )
-    p_pbm.add_argument("prospect_id", type=int)
-    p_pbm.set_defaults(func=cmd_prompt_brief_mini)
-
-    p_pom = sub.add_parser(
-        "prompt-opener-mini",
-        help="Print only basics + brief (use after prompt-opener was run once)",
-    )
-    p_pom.add_argument("prospect_id", type=int)
-    p_pom.set_defaults(func=cmd_prompt_opener_mini)
 
     p_sb = sub.add_parser("save-brief", help="Save a brief from a file")
     p_sb.add_argument("prospect_id", type=int)
