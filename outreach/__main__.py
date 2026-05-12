@@ -255,6 +255,13 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
     print(template)
     print("\n---\n")
     print("## Prospect dossier")
+    raw = data["raw"]
+    # Prefer the typed activity list; fall back to flat posts for old DB rows.
+    linkedin_data = dict(raw)
+    if "activity" not in linkedin_data and "posts" in linkedin_data:
+        linkedin_data["activity"] = [
+            {"type": "post", "text": p} for p in linkedin_data["posts"]
+        ]
     dossier = {
         "name": data["name"],
         "company": data["company"],
@@ -263,7 +270,7 @@ def cmd_prompt_brief(args: argparse.Namespace) -> int:
         "city": data["city"],
         "bni_chapter": data["bni_chapter"],
         "category": data["category"],
-        "linkedin": data["raw"],
+        "linkedin": linkedin_data,
     }
     print("```json")
     print(json.dumps(dossier, indent=2, ensure_ascii=False))
