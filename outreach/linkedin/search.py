@@ -18,6 +18,10 @@ from typing import Any, Optional
 
 from outreach import audit, rate_limiter
 from outreach.playwright_client import linkedin_session
+from outreach.taxonomy import (
+    LINKEDIN_HEADLINE_AI_COMPETITOR_TERMS,
+    SEA_LOCATION_TERMS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -25,22 +29,6 @@ from outreach.playwright_client import linkedin_session
 # ---------------------------------------------------------------------------
 
 _PROFILE_URL_RE = re.compile(r"https?://(?:[a-z]+\.)?linkedin\.com/in/[^/?#\s]+")
-
-_SEA_TERMS = frozenset([
-    "malaysia", "kuala lumpur", "kuala", " kl ", "selangor", "penang",
-    "johor", "melaka", "perak", "sabah", "sarawak", "putrajaya",
-    "petaling", "puchong", "subang", "cheras", "ampang", "klang",
-    "singapore", "indonesia", "jakarta", "thailand", "bangkok",
-    "philippines", "manila", "vietnam", "ho chi minh", "hanoi",
-    "myanmar", "brunei", "cambodia",
-])
-
-# Profiles where these appear in the headline are deprioritised per CLAUDE.md.
-_AI_COMPETITOR_TERMS = frozenset([
-    "artificial intelligence company", "ai automation", "chatbot vendor",
-    "agentic", "generative ai", "ai agent", "llm", "ai training provider",
-    "ai solutions", "ai startup",
-])
 
 # Minimum score for a result to be returned as a confident match.
 # Score breakdown: SEA location (+30), company/headline match (+20),
@@ -182,12 +170,12 @@ def _extract_search_results(page: Any, limit: int = 10) -> list[dict]:
 
 def _is_sea_location(location: str) -> bool:
     text = f" {location.lower()} "
-    return any(term in text for term in _SEA_TERMS)
+    return any(term in text for term in SEA_LOCATION_TERMS)
 
 
 def _is_ai_competitor(headline: str) -> bool:
     text = headline.lower()
-    return any(term in text for term in _AI_COMPETITOR_TERMS)
+    return any(term in text for term in LINKEDIN_HEADLINE_AI_COMPETITOR_TERMS)
 
 
 def _name_matches(result_name: str, search_name: str) -> bool:

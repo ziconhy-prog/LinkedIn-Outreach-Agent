@@ -346,43 +346,10 @@ def cmd_save_opener(args: argparse.Namespace) -> int:
     return 0
 
 
-_SUITABLE_TERMS = (
-    "advertising",
-    "marketing",
-    "branding",
-    "human resources",
-    "employment",
-    "consulting",
-    "business consultant",
-    "training",
-    "education",
-    "professional services",
-)
-
-_AI_COMPETITOR_TERMS = (
-    " ai ",
-    "artificial intelligence",
-    "automation",
-    "chatbot",
-    "agentic",
-    "machine learning",
-    "data scientist",
-    "ai agent",
-    "generative ai",
-)
-
-_TARGET_GEO_TERMS = (
-    "malaysia",
-    "kuala",
-    "selangor",
-    "petaling",
-    "johor",
-    "melaka",
-    "penang",
-    "perak",
-    "sabah",
-    "sarawak",
-    "singapore",
+from outreach.taxonomy import (
+    BNI_AI_COMPETITOR_TERMS,
+    SEA_LOCATION_TERMS,
+    SUITABLE_TERMS,
 )
 
 
@@ -393,7 +360,7 @@ def _haystack(row: dict) -> str:
     ).lower()
 
 
-def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+def _contains_any(text: str, terms) -> bool:
     padded = f" {text} "
     return any(term in padded for term in terms)
 
@@ -401,10 +368,10 @@ def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
 def _candidate_score(row: dict) -> int:
     text = _haystack(row)
     score = 0
-    for term in _SUITABLE_TERMS:
+    for term in SUITABLE_TERMS:
         if term in text:
             score += 10
-    for term in _TARGET_GEO_TERMS:
+    for term in SEA_LOCATION_TERMS:
         if term in text:
             score += 4
     if "branding" in text or "marketing" in text:
@@ -477,11 +444,11 @@ def cmd_dry_run_batch(args: argparse.Namespace) -> int:
     for raw in rows:
         row = dict(raw)
         text = _haystack(row)
-        if _contains_any(text, _AI_COMPETITOR_TERMS):
+        if _contains_any(text, BNI_AI_COMPETITOR_TERMS):
             continue
-        if not _contains_any(text, _SUITABLE_TERMS):
+        if not _contains_any(text, SUITABLE_TERMS):
             continue
-        if not _contains_any(text, _TARGET_GEO_TERMS):
+        if not _contains_any(text, SEA_LOCATION_TERMS):
             continue
         candidates.append((_candidate_score(row), row))
 
