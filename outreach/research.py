@@ -71,8 +71,6 @@ def gather_research(prospect_id: int) -> dict:
             if len(cleaned) >= 30:
                 cleaned_activity.append({"type": item["type"], "text": cleaned})
         raw["activity"] = cleaned_activity
-        # Keep flat posts list in sync for backward compat.
-        raw["posts"] = [item["text"] for item in cleaned_activity]
 
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(

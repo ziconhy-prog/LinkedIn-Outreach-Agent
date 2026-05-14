@@ -28,7 +28,6 @@ class ProfileData(TypedDict, total=False):
     headline: Optional[str]
     location: Optional[str]
     activity: list[ActivityItem]
-    posts: list[str]  # flat text list kept for backward-compat with old DB rows
 
 
 def _name_from_title(title: str) -> Optional[str]:
@@ -131,7 +130,7 @@ def read_profile(url: str, max_posts: int = 5) -> ProfileData:
     rate_limiter.check("profile_view")
     rate_limiter.check("profile_view")  # second view comes a moment later
 
-    out: ProfileData = {"url": url, "posts": []}
+    out: ProfileData = {"url": url, "activity": []}
     activity_url = url.rstrip("/") + "/recent-activity/all/"
 
     try:
@@ -184,9 +183,6 @@ def read_profile(url: str, max_posts: int = 5) -> ProfileData:
                 if activity:
                     break
             out["activity"] = activity
-            # Flat list kept for backward compat (used by prompt templates
-            # and old DB rows that predate the activity field).
-            out["posts"] = [item["text"] for item in activity]
 
             audit.log("profile_view", target=activity_url, success=True)
 
