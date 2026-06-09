@@ -16,10 +16,34 @@ def run() -> None:
     conn = get_connection()
     try:
         _add_redraft_columns(conn)
+        _add_auto_reply_columns(conn)
+        _add_pending_meeting_columns(conn)
         _convert_posts_to_activity(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _add_pending_meeting_columns(conn) -> None:
+    """Track threads waiting for a location response before booking."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+    pending = [
+        ("pending_meeting_at", "TEXT"),   # ISO datetime of the tentative meeting
+    ]
+    for col, definition in pending:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE threads ADD COLUMN {col} {definition}")
+
+
+def _add_auto_reply_columns(conn) -> None:
+    """Add columns that support automated inbox reply flow."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    pending = [
+        ("auto_reply", "INTEGER NOT NULL DEFAULT 0"),  # 1 = sent automatically
+    ]
+    for col, definition in pending:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {definition}")
 
 
 def _add_redraft_columns(conn) -> None:
