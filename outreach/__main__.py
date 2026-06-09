@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from outreach import __version__, drafting, rate_limiter, research, telegram_bot, telegram_client
+from outreach import __version__, calendar_client, daily_report, drafting, inbox_handler, rate_limiter, research, telegram_bot, telegram_client
 from outreach.config import DB_PATH, PROJECT_ROOT, ensure_dirs
 from outreach.db.connection import get_connection
 from outreach.ingest.bni_parser import parse_and_load
@@ -346,6 +346,48 @@ def cmd_save_opener(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_daily_report(_: argparse.Namespace) -> int:
+    """Generate and send the daily lead report to Telegram."""
+    try:
+        daily_report.send_daily_report()
+        print("✅ Daily report sent to Telegram.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Report failed: {exc}")
+        return 1
+    return 0
+
+
+def cmd_connect_calendar(_: argparse.Namespace) -> int:
+    """One-time Google Calendar OAuth setup — opens a browser to authenticate."""
+    try:
+        calendar_client.run_oauth_flow()
+    except FileNotFoundError as exc:
+        print(f"❌ {exc}")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ OAuth failed: {exc}")
+        return 1
+    return 0
+
+
+def cmd_poll_inbox(args: argparse.Namespace) -> int:
+    """Poll LinkedIn inbox, auto-draft replies, escalate edge cases to Telegram."""
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        print("Dry run — will classify and draft but not send or escalate.")
+    print("Polling LinkedIn inbox…")
+    summary = inbox_handler.run_inbox_cycle(dry_run=dry_run)
+    print(
+        f"\nDone. Threads checked: {summary['threads_checked']} | "
+        f"New messages: {summary['new_messages']} | "
+        f"Escalated: {summary['escalated']} | "
+        f"Drafted: {summary['drafted']} | "
+        f"Sent: {summary['sent']} | "
+        f"Errors: {summary['errors']}"
+    )
+    return 0 if summary["errors"] == 0 else 1
+
+
 from outreach.taxonomy import (
     BNI_AI_COMPETITOR_TERMS,
     SEA_LOCATION_TERMS,
@@ -587,6 +629,23 @@ def main(argv: list[str] | None = None) -> int:
 
     p_inbox = sub.add_parser("inbox", help="List pending redraft requests from Telegram")
     p_inbox.set_defaults(func=cmd_inbox)
+
+    p_report = sub.add_parser("daily-report", help="Send the daily lead report to Telegram now")
+    p_report.set_defaults(func=cmd_daily_report)
+
+    p_cal = sub.add_parser("connect-calendar", help="One-time Google Calendar OAuth setup")
+    p_cal.set_defaults(func=cmd_connect_calendar)
+
+    p_poll = sub.add_parser(
+        "poll-inbox",
+        help="Poll LinkedIn inbox, auto-draft replies, escalate edge cases to Telegram",
+    )
+    p_poll.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Classify and draft without sending or escalating",
+    )
+    p_poll.set_defaults(func=cmd_poll_inbox)
 
     p_dry = sub.add_parser(
         "dry-run-batch",
