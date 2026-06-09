@@ -43,6 +43,9 @@ PLAYWRIGHT_USER_DATA_DIR: Path = _path(
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_OPERATOR_USER_ID: str = os.getenv("TELEGRAM_OPERATOR_USER_ID", "").strip()
 
+# Claude API — for automated reply drafting.
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
 
 def ensure_dirs() -> None:
     """Create data/ and logs/ directories if they don't yet exist."""
