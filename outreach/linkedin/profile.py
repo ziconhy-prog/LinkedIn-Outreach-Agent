@@ -14,6 +14,14 @@ from __future__ import annotations
 from typing import Optional, TypedDict
 
 from outreach import audit, rate_limiter
+from outreach.linkedin.humanlike import (
+    check_for_challenge,
+    jitter,
+    long_pause,
+    random_mouse_move,
+    scroll_naturally,
+    scroll_feed_naturally,
+)
 from outreach.playwright_client import linkedin_session
 
 
@@ -140,8 +148,17 @@ def read_profile(url: str, max_posts: int = 5) -> ProfileData:
             try:
                 page.wait_for_load_state("networkidle", timeout=10_000)
             except Exception:
-                pass  # some profile pages never settle; continue anyway
-            page.wait_for_timeout(1_500)
+                pass
+            jitter(800, 1_800)
+            check_for_challenge(page)
+
+            # Humanlike: land, move mouse, scroll down to read profile
+            random_mouse_move(page)
+            scroll_naturally(page, "down", passes=2)
+            long_pause(1.0, 2.5)
+            scroll_naturally(page, "down", passes=1)
+            random_mouse_move(page)
+            jitter(500, 1_000)
 
             out["name"] = _name_from_title(page.title())
             try:
@@ -154,13 +171,22 @@ def read_profile(url: str, max_posts: int = 5) -> ProfileData:
 
             audit.log("profile_view", target=url, success=True)
 
+            # Pause before navigating to activity page
+            long_pause(1.5, 3.0)
+
             # ---- Activity page: last N posts ----
             page.goto(activity_url, wait_until="domcontentloaded")
             try:
                 page.wait_for_load_state("networkidle", timeout=15_000)
             except Exception:
                 pass
-            page.wait_for_timeout(3_000)
+            jitter(1_000, 2_500)
+            check_for_challenge(page)
+
+            # Humanlike: scroll through the activity feed naturally
+            random_mouse_move(page)
+            scroll_feed_naturally(page, post_count=max_posts + 1)
+            jitter(500, 1_200)
 
             activity: list[ActivityItem] = []
             for selector in _POST_SELECTORS:

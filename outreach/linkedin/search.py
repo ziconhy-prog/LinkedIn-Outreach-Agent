@@ -17,10 +17,16 @@ import urllib.parse
 from typing import Any, Optional
 
 from outreach import audit, rate_limiter
+from outreach.linkedin.humanlike import (
+    check_for_challenge,
+    jitter,
+    random_mouse_move,
+    scroll_naturally,
+)
 from outreach.playwright_client import linkedin_session
 from outreach.taxonomy import (
     LINKEDIN_HEADLINE_AI_COMPETITOR_TERMS,
-    SEA_LOCATION_TERMS,
+    MY_LOCATION_TERMS,
 )
 
 
@@ -169,8 +175,9 @@ def _extract_search_results(page: Any, limit: int = 10) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _is_sea_location(location: str) -> bool:
+    """Validate that a LinkedIn match is located in Malaysia (strict)."""
     text = f" {location.lower()} "
-    return any(term in text for term in SEA_LOCATION_TERMS)
+    return any(term in text for term in MY_LOCATION_TERMS)
 
 
 def _is_ai_competitor(headline: str) -> bool:
@@ -191,6 +198,38 @@ def _name_matches(result_name: str, search_name: str) -> bool:
     return search_tokens.issubset(result_tokens)
 
 
+# Common company-name suffixes / generic terms that should NOT be used as
+# evidence of a real company match. "Zeoniq Malaysia Sdn Bhd" → ["zeoniq"].
+_COMPANY_NOISE = frozenset({
+    "sdn", "bhd", "sdn.", "bhd.", "pte", "ltd", "pte.", "ltd.",
+    "inc", "inc.", "co", "co.", "company", "corporation", "corp", "corp.",
+    "group", "international", "malaysia", "global", "&", "and", "the",
+    "limited", "pvt", "pvt.", "holdings", "ventures", "asia", "asean",
+    "services", "solutions", "consulting", "consultancy", "consultants",
+    "agency", "studio", "studios", "labs", "lab", "house",
+})
+
+
+def _company_tokens(company: str) -> set[str]:
+    """Extract distinctive tokens from a company name (drops generic suffixes)."""
+    tokens = set()
+    for raw in company.lower().split():
+        clean = raw.strip(".,()-")
+        if clean and clean not in _COMPANY_NOISE and len(clean) > 1:
+            tokens.add(clean)
+    return tokens
+
+
+def _company_matches(haystack: str, expected_company: str) -> bool:
+    """True if any distinctive token of expected_company appears in haystack."""
+    tokens = _company_tokens(expected_company)
+    if not tokens:
+        # Company too generic to validate against — let the caller decide.
+        return False
+    haystack_lower = haystack.lower()
+    return any(token in haystack_lower for token in tokens)
+
+
 def _score_result(
     result: dict,
     search_name: str,
@@ -208,6 +247,16 @@ def _score_result(
     # Hard reject: AI competitor / provider in headline.
     if _is_ai_competitor(result["headline"]):
         return None
+
+    # Hard reject: when a company is provided and we have meaningful tokens
+    # for it, REQUIRE evidence of the company in the headline or location
+    # blob. Prevents same-name-different-company false matches
+    # (e.g. wrong Alan Yong incident — Zeoniq Malaysia Sdn Bhd not present).
+    company_tokens = _company_tokens(expected_company) if expected_company else set()
+    if company_tokens:
+        haystack = " ".join([result["headline"] or "", result["location"] or ""]).lower()
+        if not any(token in haystack for token in company_tokens):
+            return None
 
     score = _MIN_CONFIDENCE_SCORE  # passed SEA check
 
@@ -250,7 +299,11 @@ def search_for_profile(name: str, company: str = "") -> Optional[str]:
     try:
         with linkedin_session(headless=True) as page:
             page.goto(url, wait_until="domcontentloaded")
-            page.wait_for_timeout(2_500)
+            jitter(1_200, 2_800)
+            check_for_challenge(page)
+            random_mouse_move(page)
+            scroll_naturally(page, "down", passes=2)
+            jitter(600, 1_400)
             results = _extract_search_results(page, limit=10)
 
         if not results:

@@ -44,7 +44,14 @@ def linkedin_session(headless: bool = True) -> Iterator[Page]:
             timezone_id="Asia/Kuala_Lumpur",
         )
         try:
-            page = context.pages[0] if context.pages else context.new_page()
+            # Close any pre-existing tabs from previous sessions (stale state).
+            # Login cookies live in the profile dir, not in tabs — they survive.
+            for stale in list(context.pages):
+                try:
+                    stale.close()
+                except Exception:
+                    pass
+            page = context.new_page()
             page.set_default_timeout(15_000)
             yield page
         finally:
