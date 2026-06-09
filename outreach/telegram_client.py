@@ -107,6 +107,7 @@ def send_message(
     chat_id: int | str,
     text: str,
     reply_markup: dict[str, Any] | None = None,
+    parse_mode: str | None = None,
 ) -> dict[str, Any]:
     """Send a message to any chat_id (must be the operator for safety)."""
     payload: dict[str, Any] = {
@@ -114,6 +115,8 @@ def send_message(
         "text": text,
         "disable_web_page_preview": "true",
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     return _post("sendMessage", payload)
@@ -135,7 +138,7 @@ def get_me() -> dict[str, Any]:
     return data["result"]
 
 
-def send_operator_message(text: str) -> dict[str, Any]:
-    """Send a plain text message to the configured operator chat."""
+def send_operator_message(text: str, parse_mode: str | None = None) -> dict[str, Any]:
+    """Send a message to the configured operator chat."""
     _, operator_id = require_config()
-    return send_message(operator_id, text)
+    return send_message(operator_id, text, parse_mode=parse_mode)
