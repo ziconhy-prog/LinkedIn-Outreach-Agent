@@ -31,6 +31,15 @@ refer to without sounding creepy, over-researched, or forced.
 If nothing useful is available, write **"No suitable recent post or engagement
 hook found."** Do not invent.
 
+**Hard time window — 3 months:**
+
+Only include activity (post, comment, repost, engagement) that was posted within
+the last 3 months. Anything older than 3 months is out of bounds and must NOT be
+listed as a usable hook, no matter how relevant the topic. Always include the
+approximate age in the brief (e.g. "post (3w)", "repost (2mo)") so the drafter
+can sanity-check the window. If you cannot determine the date, treat it as too
+old and exclude it.
+
 Hard evidence rule:
 
 - Only list a post/comment/repost/engagement hook if it appears in the provided
@@ -40,7 +49,7 @@ Hard evidence rule:
   post was seen.
 - When a post hook is used, include the exact source type in the brief:
   `post`, `comment`, `repost`, or `engagement`, plus a short paraphrase or
-  short quote from the captured text.
+  short quote from the captured text, AND the approximate age.
 
 Prefer hooks about:
 
@@ -51,10 +60,11 @@ Prefer hooks about:
 
 Avoid hooks that are:
 
+- Older than 3 months (hard rule above)
 - Pure celebrations, generic quotes, awards, birthdays, or charity posts unless
   they clearly connect to a business conversation
 - Too personal
-- Too old or too thin to support a natural opener
+- Too thin to support a natural opener
 
 ### AI / L&D / upskilling engagement
 
@@ -69,9 +79,11 @@ The single most natural conversation starter, in 1–2 sentences.
 
 Use this priority order:
 
-1. A recent post/comment/engagement hook, if it is genuinely relevant.
-2. A profile/company hook, if recent activity is not useful.
-3. A market-truth hook based on their role/category, if data is thin.
+1. A post/comment/repost/engagement hook from within the last 3 months, if it
+   is genuinely relevant.
+2. An AI-adoption hook framed around their industry, category, or business —
+   used when no qualifying recent activity exists. Reference what they do, not
+   a post.
 
 The hook must work for a *non-pitch* opener. It should sound like a founder
 starting a real chat from a market truth or specific observation, not a sales

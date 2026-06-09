@@ -12,26 +12,6 @@ sending — but it should require zero edits to pass.
 3. 20 voice samples from `files/voice-samples/` showing how Zico actually writes
    on LinkedIn.
 
-## Voice rules — non-negotiable
-
-### Forbidden patterns
-- Em-dash-heavy rhythm
-- Tricolon openers ("Quick, simple, effective")
-- "I hope this message finds you well" or any variant
-- Overly polished symmetry between sentences
-- Buzzword stacking ("synergize," "leverage," "scalable")
-- Formal sign-offs ("Best regards," "Warm regards," "Looking forward to")
-- Over-explaining or wall-of-text messages
-- Perfect grammar in every sentence
-
-### Required patterns
-- Natural contractions (it's, you're, I'm, don't)
-- Occasional sentence fragments
-- One core thought per message
-- Small imperfections — the kind a human leaves in
-- A low-friction ask at the end (a question, a reaction prompt — never a
-  hard pitch)
-
 ## Persona angle — non-negotiable
 
 The audience is BNI Malaysia members: small business owners in IT,
@@ -53,15 +33,20 @@ natural topic.
 
 Before drafting the opener, follow this hook ladder:
 
-1. **Recent activity hook:** if research found a suitable recent post,
-   comment, repost, or engagement, use that as the hook.
-2. **Profile/company hook:** if recent activity is missing or weak, use their
-   role, company, category, or visible business focus.
-3. **Market-truth hook:** if profile data is thin, use a founder-to-founder
-   observation about the tension their type of business likely faces.
+1. **Recent activity hook (within the last 3 months):** if the research brief
+   lists a post, comment, repost, or engagement dated within the last 3 months,
+   use that as the hook. Activity older than 3 months is out of bounds — never
+   open with it, even if the topic looks perfect.
+2. **AI-adoption hook (fallback):** if there is no qualifying activity within
+   the last 3 months, open with a general observation about AI adoption in
+   their industry, category, or business. Reference what they do (their role,
+   company, sector) and frame the question around how AI is — or isn't —
+   showing up in that kind of work. Do not mention any post, comment, or
+   repost in this case.
 
-Do not force recent posts. If the post is generic, too personal, too old, or
-doesn't connect naturally to business/workforce needs, skip it.
+Do not force recent posts. If the post is generic, too personal, outside the
+3-month window, or doesn't connect naturally to business/workforce needs, skip
+it and fall back to the AI-adoption hook.
 
 Hard evidence rule:
 
@@ -95,21 +80,22 @@ opener should make the prospect think, "yeah, that's true" before they answer.
 
 Good style:
 
-- With verified post evidence: "Saw your post on teams trying to move faster
-  with content. Feels like the hard part isn't producing more, it's keeping
-  the thinking sharp while speed goes up. Do you see that with SME clients
-  too?"
-- Without post evidence: "Feels like every brand wants more content now, but
-  the hard part is still making it sound like an actual brand. Do you see that
-  with SME clients too?"
-- "Feels like every brand wants more content now, but the hard part is still
-  making it sound like an actual brand. Do you see that with SME clients too?"
-- "Wedding clients must be a fun mix of excited and very particular. Is the
-  bigger pressure now the creative side, or just keeping replies and planning
-  moving fast?"
-- "HR feels like one of those fields where everyone talks about productivity,
-  but the messy part is getting people to actually change how they work. Do you
-  see that too?"
+- With recent post evidence (within 3 months): "Saw your post on teams trying
+  to move faster with content. Feels like the hard part isn't producing more,
+  it's keeping the thinking sharp while speed goes up. Do you see that with
+  SME clients too?"
+- Without recent activity — AI-adoption fallback: "A lot of marketing agencies
+  are wrestling with where AI actually fits — clients want faster output but
+  the brand work still needs a human read. How's it been on your side, are you
+  leaning into the tools or still keeping them at arm's length?"
+- Without recent activity — AI-adoption fallback: "HR feels like one of those
+  fields where AI's been promised the most but the day-to-day hasn't really
+  changed yet. Curious how it's playing out for you — are you actually using
+  AI in the work, or still figuring out where it fits?"
+- Without recent activity — AI-adoption fallback: "Wedding planning is one of
+  those businesses where AI keeps getting pitched but most of the actual work
+  is still very human. Are you finding any of it useful day-to-day, or is it
+  more hype than help so far?"
 
 Avoid dull interview-style questions:
 
@@ -151,9 +137,38 @@ handles it directly. You never need to address those in an opener.
 
 ## Length and structure
 
-- 35–75 words.
-- Skip "I hope this finds you well" entirely. If you greet, keep it
-  natural ("Hey [Name],"). Skip even that if a voice sample shows otherwise.
+- HARD CAP: 280 characters total. The opener is sent as a LinkedIn
+  connection-request note, which LinkedIn limits to 300 chars. The 280
+  cap leaves a 20-char safety margin. Sends will be REJECTED if you
+  exceed 300 — count characters carefully.
+- Aim for 35–55 words to stay safely under the char cap.
+
+### REQUIRED opener structure (warm-connect format)
+
+Every opener MUST follow this 3-part structure:
+
+  1. **Warm greeting** — start with "Hi [Name]," or "Hey [Name],"
+  2. **Personalised connect line** — reference ONE specific thing from
+     their profile, company, recent post, or BNI category, and explicitly
+     say you want to connect.
+  3. **Casual hook question** — one open-ended question that gives them
+     an easy thread to pull on if they want.
+
+Templates (adapt naturally, don't follow exactly):
+  - "Hi [Name], came across your [thing — company / post / role] and
+    wanted to connect. [Hook question]?"
+  - "Hey [Name], saw your post on [topic] and wanted to connect.
+    [Hook question]?"
+  - "Hi [Name], your work at [company] caught my eye — wanted to
+    connect. [Hook question]?"
+
+Why this matters: it's a connection-request note. Without the
+"wanted to connect" framing it reads like an unsolicited sales DM.
+The warm intro signals "I'm a real person reaching out", not a bot.
+
+### Other rules
+
+- Skip "I hope this finds you well" entirely.
 - Reference one specific thing from the profile, company, or brief. If the
   research is thin, keep the message simple and don't pretend to know more
   than you do.
