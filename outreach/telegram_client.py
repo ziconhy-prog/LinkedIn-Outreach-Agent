@@ -122,6 +122,37 @@ def send_message(
     return _post("sendMessage", payload)
 
 
+def send_chat_action(chat_id: int | str, action: str = "typing") -> dict[str, Any]:
+    """Show a 'typing…' indicator while the brain thinks."""
+    return _post("sendChatAction", {"chat_id": chat_id, "action": action})
+
+
+def answer_callback_query(callback_query_id: str, text: str = "") -> dict[str, Any]:
+    """Acknowledge an inline-button press so Telegram stops the spinner."""
+    payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    return _post("answerCallbackQuery", payload)
+
+
+def edit_message_text(
+    chat_id: int | str,
+    message_id: int,
+    text: str,
+    reply_markup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Edit a previously sent message (used to replace confirmation buttons)."""
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": "true",
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    return _post("editMessageText", payload)
+
+
 def get_me() -> dict[str, Any]:
     """Return Telegram bot identity."""
     token, _ = require_config()
