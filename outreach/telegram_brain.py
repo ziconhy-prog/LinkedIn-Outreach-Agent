@@ -1,98 +1,44 @@
-"""Claude API-powered intent router for the Telegram operator bot.
+"""Conversational brain for the Telegram operator bot.
 
-Replaces keyword-based _detect_intent() with an LLM that understands
-natural language, extracts prospect names, and resolves ambiguous phrasing.
+This replaces the old single-shot intent classifier with a proper agent loop:
+Claude sees the recent conversation history plus a set of tools (show queue,
+redraft, skip, prepare a send, ...) and decides what to do — including asking
+follow-up questions it can actually understand the answers to, and doing
+several things from one message ("skip Bernard and send Keith").
 
-Called once per Telegram message. Uses Haiku for low latency and cost.
+Safety: the brain can never send anything to LinkedIn. The only send path is
+``prepare_send``, which stages a confirmation — telegram_bot then shows Zico
+a Send/Cancel button and only a button tap triggers the real send.
+
+If the Claude API is unreachable the bot says so honestly instead of silently
+degrading to keyword matching (slash commands in telegram_bot still work
+without the API).
 """
 
 from __future__ import annotations
 
 import json
-import re
+import threading
+from datetime import datetime, timedelta, timezone
 
 import anthropic
 
+from outreach import audit
 from outreach.config import ANTHROPIC_API_KEY
 from outreach.db.connection import get_connection
 
-_SYSTEM = """\
-You are the intent router for Zico's LinkedIn outreach Telegram bot.
-Zico is a Malaysian startup founder managing cold LinkedIn outreach to BNI prospects.
-
-Parse Zico's message into a JSON action. Output ONLY the JSON object — no markdown, no explanation.
-
-The bot has full access to a BNI prospect list (700+ contacts). It can search LinkedIn,
-scrape profiles, draft openers, send messages, and book meetings. NEVER claim the bot
-lacks a capability it has. When in doubt, use clarify — not chat.
-
-Available actions:
-  show_queue        — show pending drafts awaiting approval
-  show_status       — system overview (thread count, draft count)
-  send_draft        — approve and send a draft to LinkedIn
-  skip_draft        — skip/delete a draft
-  restore_draft     — bring back a previously skipped draft (target_name = prospect name)
-                      (also: "bring back X", "undelete X", "restore X", "put X back",
-                       "actually keep X", "I changed my mind about X")
-  edit_draft        — replace draft text with new text
-  redraft           — request AI redraft of ONE draft, with a direction/instruction
-  redraft_all       — request AI redraft of EVERY pending draft at once, with the
-                      same instruction applied to all (also: "redraft all", "redraft
-                      everything", "redo all the drafts", "fix all the drafts").
-                      The instruction must capture the style/angle change to apply.
-  book_meeting      — book a Google Calendar event
-  start_prospecting — search the BNI list, find LinkedIn profiles, and draft openers
-                      (also: "try a different person", "find another one", "scrape the BNI list",
-                       "yes find him and create a draft", "find him and draft", "search BNI",
-                       "get me new leads", "pull from BNI", "find another prospect")
-  show_research     — show profile info and research for a prospect
-                      (also: "tell me about X", "what does X do", "who is X",
-                       "what's X's company", "details on X", "info on X")
-  help              — show help text
-  clarify           — not enough info; set reply = a short specific question to ask Zico
-  chat              — ONLY for genuine small talk with no action needed (set reply = casual response)
-                      Do NOT use chat when an action could apply.
-
-JSON schema (always output all fields, even if empty):
-{
-  "intent": "<action name>",
-  "target_name": "<prospect name fragment as Zico typed it, or empty string>",
-  "find_replacement": false,
-  "new_text": "",
-  "instruction": "",
-  "reply": ""
-}
-
-Field rules:
-- target_name: MUST be set to the name fragment Zico typed if ANY name
-  appears in the message. Examples:
-    "send adibah" → target_name="adibah"
-    "send keith ngai" → target_name="keith ngai"
-    "approve KC" → target_name="KC"
-    "skip Bernard" → target_name="Bernard"
-  Use target_name="" ONLY when the message contains NO name at all
-  (e.g. "send it", "go ahead", "approve"). Even if just one draft is in the
-  queue, you still extract the name if Zico typed one.
-- send_draft RULE: fire send_draft IF AND ONLY IF the message contains one of these
-  send verbs: "send", "approve", "ship", "fire", "blast", "shoot", "dispatch".
-  If a send verb is present → intent=send_draft (e.g. "send it", "approve KC",
-  "send Keith", "ship Bernard", "fire it off" — all fire send_draft).
-  If NO send verb is present → never fire send_draft, even if the message sounds
-  affirmative. Bare words like "yes", "ok", "go ahead", "looks good", "sounds good",
-  "alright", "yep", "sure" → intent=clarify with
-  reply="Want me to send it? Say 'send [name]' or 'send it'."
-- send_draft with no name: target_name = "" (means "send the last one shown")
-- skip_draft: find_replacement = true only if Zico explicitly asks for a new/replacement prospect
-- edit_draft: new_text must be non-empty; if no replacement text is given, use clarify
-- redraft: instruction = what Zico wants changed (e.g. "make it shorter", "try the cost angle")
-- redraft_all: instruction = the style/angle change to apply to every draft
-  (e.g. "use the warm-connect 3-part structure under 300 chars"). target_name MUST be empty.
-- book_meeting: instruction = the full booking string (name, date, time, location)
-- chat: keep reply short and casual — Zico is Malaysian, friendly tone
-- clarify: reply = a short, specific question to ask Zico
-"""
+_MODEL = "claude-sonnet-4-6"
+_MAX_TOOL_ROUNDS = 8
+_MAX_HISTORY_MESSAGES = 24
+_MYT = timezone(timedelta(hours=8))
 
 _client: anthropic.Anthropic | None = None
+
+# Per-chat conversation history: chat_id -> list of anthropic message dicts.
+_HISTORIES: dict[int, list[dict]] = {}
+
+# Guard so two prospecting runs can't overlap.
+_PROSPECTING_LOCK = threading.Lock()
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -102,145 +48,800 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-def _fetch_queue_names() -> list[dict]:
-    """Return id + name for drafts currently in queue."""
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_STATIC = """\
+You are the assistant running Zico's LinkedIn outreach operation, chatting with \
+him on Telegram. Zico is a Malaysian startup founder (SkillTrainer AI, practical \
+AI workforce training for SMEs). He is NOT technical — talk like a sharp human \
+assistant, not like software.
+
+WHAT THE SYSTEM DOES
+- Finds prospects from his BNI contact list, researches them on LinkedIn, and
+  drafts personalised opener messages.
+- Drafts wait in a queue for his approval. NOTHING is sent without his
+  explicit confirmation via a button tap.
+- A separate automated flow replies to inbound LinkedIn messages and escalates
+  tricky ones to him here.
+- Meetings get booked into his Google Calendar.
+
+HOW TO BEHAVE
+- Use tools for everything. Never claim something was done without calling the
+  matching tool, and never invent prospects, drafts, or research.
+- Before acting, be sure WHICH draft he means. If only one draft is in the
+  queue, assume that one. If it's ambiguous, ask — and list the names so he
+  can just reply with one.
+- Style/tone/angle/length changes ("make it more casual", "too salesy",
+  "shorter", "adjust the tone", "try the cost angle") → use the redraft tool
+  with his words as the instruction. Use edit_draft ONLY when he gives the
+  literal replacement text.
+- Sending: you can never send directly. prepare_send stages it and Zico gets a
+  confirm button. After calling it, tell him to tap the button.
+- He may ask for several things in one message — do them all.
+- If he corrects you ("no, I meant..."), just do the right thing; one short
+  acknowledgment, no long apology.
+- If a tool returns an error, explain it plainly and say what he can do next.
+- When he's unsure what to say, offer 3-4 example phrases.
+- Keep replies short and casual. Plain text only — no markdown headings, no
+  asterisks. Telegram shows your text verbatim.
+"""
+
+
+def _system_dynamic() -> str:
+    """Fresh context injected on every call: date + live queue snapshot."""
+    now = datetime.now(_MYT)
+    lines = [
+        f"Current date/time: {now.strftime('%A %d %B %Y, %H:%M')} (Malaysia, UTC+8).",
+    ]
     conn = get_connection()
     try:
         rows = conn.execute(
             """
-            SELECT m.id, p.name
+            SELECT m.id, p.name, m.status
             FROM messages m
             JOIN threads t ON m.thread_id = t.id
             JOIN prospects p ON t.prospect_id = p.id
             WHERE m.status IN ('draft', 'edited')
             ORDER BY m.created_at ASC
-            LIMIT 10
+            LIMIT 15
             """
         ).fetchall()
-        return [{"id": r["id"], "name": r["name"]} for r in rows]
+        active = conn.execute(
+            "SELECT count(*) FROM threads WHERE status = 'active'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    if rows:
+        names = ", ".join(f"{r['name']} (draft #{r['id']})" for r in rows)
+        lines.append(f"Drafts currently in queue: {names}.")
+    else:
+        lines.append("Drafts currently in queue: none.")
+    lines.append(f"Active LinkedIn conversations: {active}.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool definitions
+# ---------------------------------------------------------------------------
+
+_NAME_ARG = {
+    "type": "string",
+    "description": "Prospect name or fragment as Zico said it (e.g. 'keith', 'Xia Dan'). "
+                   "Empty string means 'the only/obvious one'.",
+}
+
+TOOLS: list[dict] = [
+    {
+        "name": "get_queue",
+        "description": "List the opener drafts waiting for approval, with their full text.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_status",
+        "description": "System overview: drafts waiting, active conversations, recent activity.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_research",
+        "description": "Show profile info, research brief, and current draft for one prospect.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": _NAME_ARG},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "get_skipped",
+        "description": "List recently skipped drafts (these can be restored).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "skip_draft",
+        "description": "Skip (discard) a draft so it won't be sent. Reversible via restore_draft.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": _NAME_ARG},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "restore_draft",
+        "description": "Bring a previously skipped draft back into the queue.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": _NAME_ARG},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "edit_draft",
+        "description": "Replace a draft's text with EXACT text Zico provided word-for-word. "
+                       "For style/tone/angle/length changes use redraft instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": _NAME_ARG,
+                "new_text": {"type": "string", "description": "The literal replacement text."},
+            },
+            "required": ["name", "new_text"],
+        },
+    },
+    {
+        "name": "redraft",
+        "description": "Have the AI rewrite ONE draft following an instruction (tone, angle, "
+                       "length, etc.). Returns the new text — show it to Zico.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": _NAME_ARG,
+                "instruction": {
+                    "type": "string",
+                    "description": "What to change, in Zico's words (e.g. 'more casual', "
+                                   "'lead with the cost angle', 'shorter').",
+                },
+            },
+            "required": ["name", "instruction"],
+        },
+    },
+    {
+        "name": "redraft_all",
+        "description": "Rewrite EVERY pending draft with the same instruction. "
+                       "Takes a little while; returns a summary with the new texts.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "instruction": {"type": "string", "description": "The change to apply to all drafts."},
+            },
+            "required": ["instruction"],
+        },
+    },
+    {
+        "name": "prepare_send",
+        "description": "Stage a draft for sending to LinkedIn. Zico will see the draft with a "
+                       "Send/Cancel button — the send only happens when he taps Send. "
+                       "This is the ONLY way anything reaches LinkedIn.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": _NAME_ARG},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "start_prospecting",
+        "description": "Find new prospects from the BNI list, research them on LinkedIn, and "
+                       "draft openers. Runs in the background for several minutes and posts "
+                       "progress updates as separate messages.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "description": "How many prospects to find (1-5). Default 3.",
+                },
+            },
+        },
+    },
+    {
+        "name": "book_meeting",
+        "description": "Create a Google Calendar event for a meeting with a prospect. "
+                       "Work out the exact date from today's date if Zico says 'tomorrow' etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prospect_name": {"type": "string", "description": "Prospect name or fragment."},
+                "date": {"type": "string", "description": "Meeting date, YYYY-MM-DD."},
+                "time": {"type": "string", "description": "Meeting start time, 24h HH:MM."},
+                "location": {"type": "string", "description": "Where (e.g. 'Bangsar', 'video call')."},
+            },
+            "required": ["prospect_name", "date", "time", "location"],
+        },
+    },
+    {
+        "name": "health_check",
+        "description": "Check system health: database, Claude API, Telegram, Google Calendar, "
+                       "and LinkedIn login. The LinkedIn check opens a browser and takes ~20s.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Draft resolution
+# ---------------------------------------------------------------------------
+
+def _fetch_drafts(statuses: tuple[str, ...] = ("draft", "edited")) -> list[dict]:
+    conn = get_connection()
+    try:
+        placeholders = ",".join("?" for _ in statuses)
+        rows = conn.execute(
+            f"""
+            SELECT m.id, m.status, m.content, p.id AS prospect_id, p.name,
+                   p.company, p.city, p.area, r.brief_md
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN prospects p ON t.prospect_id = p.id
+            LEFT JOIN research r ON r.prospect_id = p.id
+            WHERE m.status IN ({placeholders})
+            ORDER BY m.created_at ASC
+            """,
+            statuses,
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
 
-def parse_intent(
-    message: str,
-    queue_names: list[dict] | None = None,
-) -> dict:
-    """Parse a natural language Telegram message into a structured action dict.
+def _resolve_draft(
+    name: str,
+    statuses: tuple[str, ...] = ("draft", "edited"),
+) -> tuple[dict | None, str | None]:
+    """Match a name fragment to exactly one draft. Returns (row, error_message)."""
+    rows = _fetch_drafts(statuses)
+    label = "skipped drafts" if statuses == ("skipped",) else "drafts in the queue"
+    if not rows:
+        return None, f"There are no {label} right now."
 
-    Args:
-        message: Raw text from Zico's Telegram message.
-        queue_names: Optional pre-fetched list of {id, name} dicts for context.
-                     Fetched from DB automatically if not provided.
+    frag = (name or "").lower().strip()
+    if not frag:
+        if len(rows) == 1:
+            return rows[0], None
+        names = ", ".join(r["name"] for r in rows)
+        return None, f"There are {len(rows)} {label}: {names}. Which one does Zico mean?"
 
-    Returns:
-        Dict with keys: intent, target_name, find_replacement, new_text, instruction, reply.
-        Falls back to keyword detection if API key is missing or call fails.
-    """
-    if not ANTHROPIC_API_KEY:
-        return _fallback(message)
+    matches = [r for r in rows if frag in r["name"].lower()]
+    if not matches:
+        frag_tokens = set(frag.split())
+        matches = [r for r in rows if frag_tokens & set(r["name"].lower().split())]
+    if not matches:
+        names = ", ".join(r["name"] for r in rows)
+        return None, f"No {label[:-1] if label.endswith('s') else label} matches '{name}'. Available: {names}."
+    if len(matches) > 1:
+        names = ", ".join(r["name"] for r in matches)
+        return None, f"'{name}' matches more than one: {names}. Ask Zico which one."
+    return matches[0], None
 
-    if queue_names is None:
-        queue_names = _fetch_queue_names()
 
-    if queue_names:
-        queue_ctx = "Drafts in queue: " + ", ".join(
-            f"{r['name']} (#{r['id']})" for r in queue_names
+# ---------------------------------------------------------------------------
+# Tool implementations — each returns a plain string for Claude to relay.
+# ---------------------------------------------------------------------------
+
+def _tool_get_queue() -> str:
+    rows = _fetch_drafts()
+    if not rows:
+        return "The queue is empty — no drafts waiting."
+    parts = [f"{len(rows)} draft(s) waiting:"]
+    for r in rows:
+        tag = " [edited]" if r["status"] == "edited" else ""
+        parts.append(
+            f"\n— {r['name']} ({r['company'] or 'company unknown'}){tag}, "
+            f"{len(r['content'])} chars:\n{r['content']}"
         )
-    else:
-        queue_ctx = "Drafts in queue: none"
+    return "\n".join(parts)
 
-    user_content = f"{queue_ctx}\n\nZico says: {message}"
 
+def _tool_get_status() -> str:
+    conn = get_connection()
     try:
-        client = _get_client()
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=150,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": user_content}],
+        drafts = conn.execute(
+            "SELECT count(*) FROM messages WHERE status IN ('draft', 'edited')"
+        ).fetchone()[0]
+        active = conn.execute(
+            "SELECT count(*) FROM threads WHERE status = 'active'"
+        ).fetchone()[0]
+        sent_today = conn.execute(
+            "SELECT count(*) FROM messages WHERE status = 'sent' "
+            "AND DATE(sent_at, 'localtime') = DATE('now', 'localtime')"
+        ).fetchone()[0]
+        attention = conn.execute(
+            "SELECT count(*) FROM messages WHERE needs_attention = 1 "
+            "AND direction = 'inbound'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return (
+        f"Drafts awaiting approval: {drafts}\n"
+        f"Active LinkedIn conversations: {active}\n"
+        f"Messages sent today: {sent_today}\n"
+        f"Inbound messages needing Zico's attention: {attention}"
+    )
+
+
+def _tool_get_research(name: str) -> str:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT p.id, p.name, p.company, p.profession, p.city, p.area,
+                   p.category, p.linkedin_url, p.enrichment_status,
+                   r.brief_md,
+                   m.content AS draft_content
+            FROM prospects p
+            LEFT JOIN research r ON r.prospect_id = p.id
+            LEFT JOIN threads t ON t.prospect_id = p.id
+            LEFT JOIN messages m ON m.thread_id = t.id
+                AND m.status IN ('draft', 'edited')
+            WHERE lower(p.name) LIKE ?
+            ORDER BY p.id ASC
+            LIMIT 1
+            """,
+            (f"%{(name or '').lower().strip()}%",),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return f"No prospect found matching '{name}'."
+    parts = [f"Name: {row['name']}"]
+    if row["company"]:
+        parts.append(f"Company: {row['company']}")
+    if row["profession"]:
+        parts.append(f"Role: {row['profession']}")
+    location = row["city"] or row["area"] or ""
+    if location:
+        parts.append(f"Location: {location}")
+    if row["category"]:
+        parts.append(f"BNI category: {row['category']}")
+    if row["linkedin_url"]:
+        parts.append(f"LinkedIn: {row['linkedin_url']}")
+    if row["brief_md"]:
+        parts.append(f"\nResearch brief:\n{row['brief_md']}")
+    if row["draft_content"]:
+        parts.append(f"\nCurrent draft opener:\n{row['draft_content']}")
+    elif row["enrichment_status"] == "pending":
+        parts.append("\nNot yet researched — run prospecting to get research and a draft.")
+    return "\n".join(parts)
+
+
+def _tool_get_skipped() -> str:
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.id, p.name, m.content
+            FROM messages m
+            JOIN threads t ON m.thread_id = t.id
+            JOIN prospects p ON t.prospect_id = p.id
+            WHERE m.status = 'skipped'
+            ORDER BY m.created_at DESC
+            LIMIT 5
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return "No skipped drafts."
+    return "Recently skipped (restorable): " + ", ".join(r["name"] for r in rows)
+
+
+def _tool_skip_draft(name: str) -> str:
+    row, err = _resolve_draft(name)
+    if err:
+        return err
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE messages SET status = 'skipped' WHERE id = ?", (row["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    audit.log("telegram_command", target=f"skip_{row['id']}")
+    return f"Skipped the draft for {row['name']}. It can be restored if Zico changes his mind."
+
+
+def _tool_restore_draft(name: str) -> str:
+    row, err = _resolve_draft(name, statuses=("skipped",))
+    if err:
+        return err
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE messages SET status = 'draft' WHERE id = ?", (row["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    audit.log("telegram_command", target=f"restore_{row['id']}")
+    return f"Restored the draft for {row['name']} — it's back in the queue."
+
+
+def _tool_edit_draft(name: str, new_text: str) -> str:
+    if not new_text.strip():
+        return "No replacement text given — ask Zico what the draft should say."
+    row, err = _resolve_draft(name)
+    if err:
+        return err
+    text = new_text.strip()
+    if len(text) > 300:
+        return (
+            f"That text is {len(text)} characters — LinkedIn connection notes cap at 300, "
+            "so the send would fail. Ask Zico to shorten it, or offer to shorten it for him."
         )
-        raw = response.content[0].text.strip()
-    except Exception:
-        return _fallback(message)
-
+    conn = get_connection()
     try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            try:
-                result = json.loads(match.group())
-            except json.JSONDecodeError:
-                return _fallback(message)
-        else:
-            return _fallback(message)
+        conn.execute(
+            "UPDATE messages SET content = ?, status = 'edited' WHERE id = ?",
+            (text, row["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    audit.log("telegram_command", target=f"edit_{row['id']}")
+    return f"Updated {row['name']}'s draft ({len(text)} chars). New text:\n{text}"
 
-    return {
-        "intent": result.get("intent") or "clarify",
-        "target_name": result.get("target_name") or "",
-        "find_replacement": bool(result.get("find_replacement", False)),
-        "new_text": result.get("new_text") or "",
-        "instruction": result.get("instruction") or "",
-        "reply": result.get("reply") or "",
+
+def _tool_redraft(name: str, instruction: str) -> str:
+    if not instruction.strip():
+        return "No direction given — ask Zico what he wants changed."
+    row, err = _resolve_draft(name)
+    if err:
+        return err
+    if not row["brief_md"]:
+        return (
+            f"{row['name']} has no research brief, so the AI can't redraft safely. "
+            "Zico can edit the text directly instead."
+        )
+    from outreach import drafter
+
+    prospect = {
+        "name": row["name"],
+        "company": row["company"] or "",
+        "city": row["city"] or "",
+        "area": row["area"] or "",
     }
+    try:
+        new_text = drafter.regenerate_opener(
+            prospect=prospect,
+            brief=row["brief_md"],
+            current_draft=row["content"],
+            instruction=instruction.strip(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Redraft failed ({type(exc).__name__}: {exc}). Try again in a minute."
+
+    if len(new_text) > 300:
+        return (
+            f"The rewrite came out at {len(new_text)} chars — over the 300-char LinkedIn "
+            "limit, so it was NOT saved. Retry the redraft tool with the same instruction "
+            "plus 'keep it under 280 characters'."
+        )
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE messages
+            SET content = ?, status = 'edited',
+                redraft_instruction = NULL, redraft_requested_at = NULL
+            WHERE id = ?
+            """,
+            (new_text, row["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    audit.log("telegram_command", target=f"redraft_{row['id']}")
+    return f"New draft for {row['name']} ({len(new_text)} chars) — show it to Zico:\n{new_text}"
 
 
-_TRIGGER_WORDS = {
-    "send", "approve", "ship", "fire", "blast", "shoot", "dispatch",
-    "skip", "delete", "remove", "drop", "discard", "scrap",
-    "edit", "change", "rewrite", "replace", "tweak", "fix", "adjust",
-    "bring", "back", "restore", "undelete", "keep",
-    "tell", "about", "show", "details", "info", "research",
-    "the", "a", "to", "for", "me", "please", "this", "that", "it",
-    "message", "draft", "one", "guy", "person", "prospect",
+def _tool_redraft_all(instruction: str) -> str:
+    if not instruction.strip():
+        return "No direction given — ask Zico what style/angle to apply to all drafts."
+    rows = _fetch_drafts()
+    if not rows:
+        return "The queue is empty — nothing to redraft."
+    results = []
+    for row in rows:
+        results.append(_tool_redraft(row["name"], instruction))
+    return "\n\n".join(results)
+
+
+def _tool_prepare_send(name: str, staged: list[dict]) -> str:
+    row, err = _resolve_draft(name)
+    if err:
+        return err
+    staged.append({"message_id": row["id"], "name": row["name"]})
+    return (
+        f"Staged. Zico will now see {row['name']}'s draft with a Send/Cancel button — "
+        "tell him to tap Send to fire it. Nothing is sent until he does."
+    )
+
+
+def _tool_start_prospecting(count: int, chat_id: int) -> str:
+    limit = max(1, min(int(count or 3), 5))
+    if not _PROSPECTING_LOCK.acquire(blocking=False):
+        return "A prospecting run is already in progress — wait for it to finish first."
+
+    from outreach import prospecting_pipeline
+    from outreach.telegram_client import send_message as _send
+
+    def _notify(msg: str) -> None:
+        try:
+            _send(chat_id, msg)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _run() -> None:
+        try:
+            prospecting_pipeline.run(limit=limit, notify=_notify)
+        except Exception as exc:  # noqa: BLE001
+            _notify(f"⚠️ Prospecting stopped with an error: {exc}")
+        finally:
+            _PROSPECTING_LOCK.release()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return (
+        f"Prospecting started in the background for {limit} prospect(s). "
+        "Progress updates will arrive as separate messages over the next few minutes."
+    )
+
+
+def _tool_book_meeting(prospect_name: str, date: str, time_s: str, location: str) -> str:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, name, company, linkedin_url FROM prospects "
+            "WHERE lower(name) LIKE ? LIMIT 1",
+            (f"%{prospect_name.lower().strip()}%",),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return f"No prospect found matching '{prospect_name}'."
+
+    try:
+        start = datetime.strptime(f"{date} {time_s}", "%Y-%m-%d %H:%M").replace(tzinfo=_MYT)
+    except ValueError:
+        return f"Couldn't understand the date/time ('{date} {time_s}'). Ask Zico to re-confirm."
+    if start < datetime.now(_MYT):
+        return f"That time ({start.strftime('%A %d %B, %I:%M%p')}) is in the past — ask Zico to re-confirm."
+
+    from outreach import calendar_client
+
+    try:
+        end = start + timedelta(hours=1)
+        if not calendar_client.is_free(start, end):
+            return (
+                f"Zico's calendar already has something at "
+                f"{start.strftime('%A %d %B, %I:%M%p')}. Ask if he wants to double-book."
+            )
+        event_url = calendar_client.create_meeting_event(
+            prospect_name=row["name"],
+            company=row["company"] or "",
+            linkedin_url=row["linkedin_url"] or "",
+            start=start,
+            location=location,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"Calendar booking failed: {exc}. "
+            "If the calendar isn't connected yet, run connect-calendar on the Mac once."
+        )
+    audit.log("meeting_booked", target=f"prospect:{row['id']}")
+    return (
+        f"Booked: {row['name']} ({row['company'] or 'company unknown'}), "
+        f"{start.strftime('%A %d %B, %I:%M%p')} at {location}. Event: {event_url}"
+    )
+
+
+def _tool_health_check() -> str:
+    from outreach.config import (
+        DATA_DIR,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_OPERATOR_USER_ID,
+    )
+    import os
+
+    lines = []
+
+    # Telegram — if we're answering, it works.
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_OPERATOR_USER_ID:
+        lines.append("✅ Telegram: connected (you're chatting through it now)")
+    else:
+        lines.append("❌ Telegram: bot token or operator ID missing in .env")
+
+    # Claude API — this very reply proves it.
+    lines.append("✅ Claude AI: working (this reply came from it)")
+
+    # Database.
+    try:
+        conn = get_connection()
+        try:
+            n = conn.execute("SELECT count(*) FROM prospects").fetchone()[0]
+        finally:
+            conn.close()
+        lines.append(f"✅ Database: OK ({n} prospects loaded)")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"❌ Database: problem — {exc}")
+
+    # Google Calendar token.
+    token_path = os.getenv("GOOGLE_OAUTH_TOKEN_PATH", "").strip() or str(
+        DATA_DIR / "google_oauth_token.json"
+    )
+    if os.path.exists(token_path):
+        lines.append("✅ Google Calendar: connected")
+    else:
+        lines.append(
+            "⚠️ Google Calendar: not connected yet — run connect-calendar once on the Mac"
+        )
+
+    # LinkedIn session (slow — opens a browser).
+    try:
+        from outreach.linkedin.session import check_session
+
+        if check_session():
+            lines.append("✅ LinkedIn: logged in")
+        else:
+            lines.append(
+                "❌ LinkedIn: session expired — open the bot's browser and log in again "
+                "(linkedin-login on the Mac)"
+            )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"⚠️ LinkedIn: couldn't check ({exc})")
+
+    return "\n".join(lines)
+
+
+# Registry — the live-eval script patches this to spy on tool choices.
+TOOL_IMPLS: dict = {
+    "get_queue": lambda args, ctx: _tool_get_queue(),
+    "get_status": lambda args, ctx: _tool_get_status(),
+    "get_research": lambda args, ctx: _tool_get_research(args.get("name", "")),
+    "get_skipped": lambda args, ctx: _tool_get_skipped(),
+    "skip_draft": lambda args, ctx: _tool_skip_draft(args.get("name", "")),
+    "restore_draft": lambda args, ctx: _tool_restore_draft(args.get("name", "")),
+    "edit_draft": lambda args, ctx: _tool_edit_draft(
+        args.get("name", ""), args.get("new_text", "")
+    ),
+    "redraft": lambda args, ctx: _tool_redraft(
+        args.get("name", ""), args.get("instruction", "")
+    ),
+    "redraft_all": lambda args, ctx: _tool_redraft_all(args.get("instruction", "")),
+    "prepare_send": lambda args, ctx: _tool_prepare_send(
+        args.get("name", ""), ctx["staged_sends"]
+    ),
+    "start_prospecting": lambda args, ctx: _tool_start_prospecting(
+        args.get("count", 3), ctx["chat_id"]
+    ),
+    "book_meeting": lambda args, ctx: _tool_book_meeting(
+        args.get("prospect_name", ""),
+        args.get("date", ""),
+        args.get("time", ""),
+        args.get("location", ""),
+    ),
+    "health_check": lambda args, ctx: _tool_health_check(),
 }
 
 
-def _extract_name_fallback(message: str) -> str:
-    """Strip trigger words and return remaining text as a name fragment."""
-    tokens = [t.strip(",.!?'\"") for t in message.split()]
-    keep = [t for t in tokens if t and t.lower() not in _TRIGGER_WORDS]
-    return " ".join(keep).strip()
+def _execute_tool(name: str, args: dict, ctx: dict) -> str:
+    impl = TOOL_IMPLS.get(name)
+    if impl is None:
+        return f"Unknown tool '{name}'."
+    try:
+        return impl(args, ctx)
+    except Exception as exc:  # noqa: BLE001
+        return f"Tool '{name}' failed ({type(exc).__name__}: {exc})."
 
 
-def _fallback(message: str) -> dict:
-    """Keyword-based fallback when API is unavailable."""
-    lower = message.lower()
-    words = set(lower.split())
+# ---------------------------------------------------------------------------
+# Agent loop
+# ---------------------------------------------------------------------------
 
-    intent = "clarify"
-    if any(p in lower for p in ("run a search", "find prospects", "pull prospects", "start prospecting", "find new leads", "new prospects")):
-        intent = "start_prospecting"
-    elif any(p in lower for p in ("booked", "meeting confirmed", "confirmed meeting", "scheduled")):
-        intent = "book_meeting"
-    elif any(p in lower for p in ("bring back", "put back", "restore", "undelete")):
-        intent = "restore_draft"
-    elif words & {"skip", "delete", "remove", "drop", "discard", "scrap"}:
-        intent = "skip_draft"
-    elif words & {"edit", "change", "rewrite", "replace", "tweak", "fix", "adjust"}:
-        intent = "edit_draft"
-    elif words & {"send", "approve", "ship", "fire", "blast", "shoot", "dispatch"}:
-        intent = "send_draft"
-    elif any(p in lower for p in ("tell me about", "what does", "who is", "details on", "info on", "show me")):
-        intent = "show_research"
-    elif words & {"queue", "drafts", "pending", "waiting", "list"}:
-        intent = "show_queue"
-    elif words & {"status", "start", "summary", "overview", "report"}:
-        intent = "show_status"
-    elif words & {"help", "commands", "options"}:
-        intent = "help"
+def _serialize_content(blocks) -> list[dict]:
+    out = []
+    for b in blocks:
+        if b.type == "text":
+            out.append({"type": "text", "text": b.text})
+        elif b.type == "tool_use":
+            out.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+    return out
 
-    # Extract a name fragment for actions that need it.
-    target_name = ""
-    if intent in ("send_draft", "skip_draft", "edit_draft", "restore_draft", "show_research", "redraft"):
-        target_name = _extract_name_fallback(message)
 
-    return {
-        "intent": intent,
-        "target_name": target_name,
-        "find_replacement": any(p in lower for p in ("find another", "find a new", "new prospect", "replace")),
-        "new_text": "",
-        "instruction": message if intent == "book_meeting" else "",
-        "reply": "Not sure what you mean. Try 'show queue', 'send [name]', or 'status'.",
-    }
+def _trim_history(messages: list[dict]) -> list[dict]:
+    """Cap history length; ensure it starts with a plain user text message."""
+    trimmed = messages[-_MAX_HISTORY_MESSAGES:]
+    while trimmed:
+        first = trimmed[0]
+        if first["role"] == "user" and isinstance(first.get("content"), str):
+            break
+        trimmed.pop(0)
+    return trimmed
+
+
+def handle_message(chat_id: int, text: str) -> dict:
+    """Run one conversational turn. Returns {'reply': str, 'staged_sends': [...]}.
+
+    staged_sends entries are {'message_id': int, 'name': str} — telegram_bot
+    shows a Send/Cancel button for each.
+    """
+    if not ANTHROPIC_API_KEY:
+        return {
+            "reply": (
+                "⚠️ My AI brain isn't configured (ANTHROPIC_API_KEY is missing in .env). "
+                "Slash commands like /queue and /skip still work."
+            ),
+            "staged_sends": [],
+        }
+
+    history = _HISTORIES.get(chat_id, [])
+    messages = history + [{"role": "user", "content": text}]
+    ctx = {"chat_id": chat_id, "staged_sends": []}
+
+    client = _get_client()
+    system = [
+        {"type": "text", "text": _SYSTEM_STATIC, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": _system_dynamic()},
+    ]
+
+    final_text = ""
+    try:
+        for _ in range(_MAX_TOOL_ROUNDS):
+            response = client.messages.create(
+                model=_MODEL,
+                max_tokens=1000,
+                temperature=0.3,
+                system=system,
+                tools=TOOLS,
+                messages=messages,
+            )
+            content = _serialize_content(response.content)
+            messages.append({"role": "assistant", "content": content})
+            final_text = "\n".join(
+                b["text"] for b in content if b["type"] == "text"
+            ).strip()
+
+            if response.stop_reason != "tool_use":
+                break
+
+            results = []
+            for block in content:
+                if block["type"] == "tool_use":
+                    print(f"[brain] tool={block['name']} input={block['input']}")
+                    output = _execute_tool(block["name"], block["input"], ctx)
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block["id"],
+                            "content": output,
+                        }
+                    )
+            messages.append({"role": "user", "content": results})
+    except anthropic.APIError as exc:
+        return {
+            "reply": (
+                "⚠️ I'm having trouble reaching my AI brain right now "
+                f"({type(exc).__name__}). Give it a minute and try again — "
+                "or use /queue and /skip which work without it."
+            ),
+            "staged_sends": [],
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "reply": f"⚠️ Something went wrong on my side ({type(exc).__name__}: {exc}). Try again.",
+            "staged_sends": [],
+        }
+
+    _HISTORIES[chat_id] = _trim_history(messages)
+    return {"reply": final_text, "staged_sends": ctx["staged_sends"]}
+
+
+def reset_history(chat_id: int) -> None:
+    """Forget the conversation (used by /reset)."""
+    _HISTORIES.pop(chat_id, None)
