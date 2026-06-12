@@ -91,8 +91,14 @@ That's it. Two short sentences max. If you have more to say — don't.\
 
 
 def _conversation_stage(outbound_count: int) -> int:
-    """Derive conversation stage from how many outbound messages have been sent."""
-    return min(outbound_count + 1, 4)
+    """Derive conversation stage from how many outbound messages have been sent.
+
+    The opener counts as outbound #1, so the first reply is stage 2. Clamped
+    to 2..4 — stage 1 has no reply instructions (it's the opener), and without
+    the lower clamp a thread with outbound_count=0 would fall through to the
+    stage-4 'ask for a meeting' instructions on the very first reply.
+    """
+    return min(max(outbound_count + 1, 2), 4)
 
 
 def draft_reply(

@@ -11,13 +11,27 @@ Returns one of:
 
 from __future__ import annotations
 
+import re
 
+
+def _matches_any(lower: str, terms: frozenset[str]) -> bool:
+    """Word-boundary matching — plain substring checks misfire badly
+    (e.g. 'fee' inside 'coffee', 'free on' inside 'carefree once')."""
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", lower)
+        for term in terms
+    )
+
+
+# Multi-word phrases only — single generic words ("api", "security",
+# "integration") caused normal messages to be escalated as tech questions.
 _ARCHITECTURE_TERMS = frozenset([
     "architecture", "infrastructure", "how is it built", "how does it work technically",
     "what technology", "tech stack", "data handling", "data privacy", "data security",
-    "where is data stored", "integration", "api", "lms", "learning management",
-    "how does the ai", "what model", "gpt", "openai", "which llm", "built on",
-    "security", "compliance", "gdpr", "pdpa", "iso", "soc 2",
+    "where is data stored", "your api", "api integration", "integrate with our",
+    "learning management system", "how does the ai", "what model do you use",
+    "which llm", "built on gpt", "is it gpt", "built on openai", "is it chatgpt",
+    "security audit", "compliance requirement", "gdpr", "pdpa", "iso 27001", "soc 2",
 ])
 
 _AGGRESSIVE_TERMS = frozenset([
@@ -46,11 +60,14 @@ _MEETING_TERMS = frozenset([
     "can we meet", "would love to meet", "set up a meeting",
 ])
 
+# Strong confirmation phrases only — this branch triggers the automated
+# location-ask + calendar booking, so weak signals ("perfect", "can do",
+# "looking forward") that merely co-occur with a time word must not match.
 _MEETING_CONFIRMED_TERMS = frozenset([
-    "sounds good", "works for me", "i'm free", "im free", "can do",
-    "let's do", "lets do", "that works", "perfect", "confirmed",
+    "sounds good", "works for me", "i'm free", "im free",
+    "let's do", "lets do", "that works", "confirmed",
     "see you then", "see you there", "i'll be there", "ill be there",
-    "looking forward", "locked in", "put it in", "done deal",
+    "locked in", "done deal",
 ])
 
 _TIME_INDICATORS = frozenset([
@@ -66,25 +83,25 @@ def classify(text: str) -> str:
     """Return classification string for an inbound message."""
     lower = text.lower()
 
-    if any(term in lower for term in _ARCHITECTURE_TERMS):
+    if _matches_any(lower, _ARCHITECTURE_TERMS):
         return "architecture_question"
 
-    if any(term in lower for term in _AGGRESSIVE_TERMS):
+    if _matches_any(lower, _AGGRESSIVE_TERMS):
         return "aggressive"
 
     # Meeting confirmed: has both a confirmation phrase AND a time reference
-    has_confirmation = any(term in lower for term in _MEETING_CONFIRMED_TERMS)
-    has_time = any(term in lower for term in _TIME_INDICATORS)
+    has_confirmation = _matches_any(lower, _MEETING_CONFIRMED_TERMS)
+    has_time = _matches_any(lower, _TIME_INDICATORS)
     if has_confirmation and has_time:
         return "meeting_confirmed"
 
-    if any(term in lower for term in _NEGATIVE_TERMS):
+    if _matches_any(lower, _NEGATIVE_TERMS):
         return "not_interested"
 
-    if any(term in lower for term in _PRICING_TERMS):
+    if _matches_any(lower, _PRICING_TERMS):
         return "pricing"
 
-    if any(term in lower for term in _MEETING_TERMS):
+    if _matches_any(lower, _MEETING_TERMS):
         return "meeting_request"
 
     return "normal"

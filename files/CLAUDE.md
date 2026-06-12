@@ -6,10 +6,12 @@ This project helps the founder run LinkedIn cold outreach for SkillTrainer AI.
 It surfaces prospects, gathers lightweight research, drafts human-sounding
 messages, and prepares reply/meeting workflows.
 
-**The system is drafting and approval infrastructure. It is not an autonomous
-sender. No LinkedIn message, connection request, reply, reaction, or calendar
-booking confirmation may happen without the operator's explicit Telegram
-approval.**
+**First contact is always operator-gated: no opener or connection request
+leaves the system without the operator tapping a Send confirmation button in
+Telegram. Once a prospect replies, the inbox flow may auto-send normal
+stage-2/3/4 replies, but anything sensitive (pricing, not interested,
+aggressive, tech/architecture, meeting confirmation, anything uncertain)
+escalates to the operator instead of being answered automatically.**
 
 Before making product or implementation decisions, read:
 
@@ -35,49 +37,56 @@ When working on this project:
 
 ## Non-Negotiable Rules
 
-### 1. Human Approval Before Any Send
+### 1. Human Approval Before First Contact
 
-Every outbound LinkedIn action must be gated by Telegram approval.
+Every FIRST outbound to a prospect (opener / connection request) must be
+gated by an explicit Telegram confirmation button tap.
 
 Required:
 
-- Every opener, reply, follow-up, closer, and connection request goes to the
-  Telegram approval queue first.
-- The final send path accepts only a Telegram-approved queue/message ID.
+- Every opener and connection request goes to the Telegram approval queue
+  first, and is only sent after the operator taps the Send confirmation
+  button (`telegram_bot.request_send_confirmation` → callback).
+- The final send path accepts only an approved queue/message ID
+  (`outreach/linkedin/send.py` requires status 'approved' or 'auto_draft').
 - The send path must reject raw message text.
-- The bot must show Approve & Send, Edit, Skip, and Defer controls for drafts.
+- The Telegram brain (`telegram_brain.py`) must never be able to send
+  directly — its only send-adjacent tool is `prepare_send`, which stages a
+  confirmation button.
+
+Auto-replies (allowed, bounded):
+
+- Once a prospect has replied, `inbox_handler.py` may auto-send normal
+  stage-2/3/4 replies after classification, with a humanlike scheduled delay.
+- Anything classified as pricing, not-interested, aggressive, meeting-related,
+  architecture/tech, or uncertain escalates to the operator instead.
 
 Forbidden:
 
-- Auto-sending messages, replies, reactions, or connection requests.
+- Auto-sending openers or connection requests.
 - "Just this once" bypasses.
-- Sending from an in-Claude-Code prompt.
 - Any code path where the LLM can provide raw text directly to a send action.
 
-If the operator asks for autonomous sending, explain the account-safety risk
-and keep the Telegram approval gate.
+If the operator asks for fully autonomous first-contact sending, explain the
+account-safety risk and keep the Telegram confirmation gate.
 
-### 2. Claude Pro Only, No LLM APIs in v1
+### 2. Claude API Usage
 
-All LLM work in v1 happens interactively inside Claude Code using the
-operator's Claude Pro subscription.
+LLM work runs through the Anthropic API (`ANTHROPIC_API_KEY` in `.env`) using
+`claude-sonnet-4-6`: research briefs and openers (prospecting pipeline),
+reply drafting and meeting extraction (inbox flow), and the conversational
+Telegram brain. (The original v1 "Claude Pro only, no API" rule was retired
+when the prospecting pipeline and inbox auto-reply flow were added.)
 
-Forbidden in v1:
+Rules:
 
-- Anthropic API calls, SDKs, raw HTTP calls, or `ANTHROPIC_API_KEY`.
-- OpenAI, Google, Azure OpenAI, or other paid LLM providers unless the operator
-  explicitly approves a v2 change with a documented cost cap.
-- Scheduled/background LLM calls.
-- Overnight/weekend drafting without the operator present.
-
-Allowed:
-
-- Scheduled prospect surfacing that does not call an LLM.
-- Local data gathering via Playwright MCP.
-- Prompt generation files that Claude Code reads during an interactive session.
-
-If the operator hits Claude Pro limits, pause cleanly and tell them to resume
-after the limit resets. Do not add an API fallback.
+- Keep system prompts cache-controlled (`cache_control: ephemeral`) — they are
+  large (voice spec + humanize rules) and repeated.
+- No unbounded LLM loops: every agent/retry loop must have a hard iteration cap.
+- Do not add other LLM providers without the operator's explicit approval and
+  a documented cost cap.
+- If API calls fail, degrade honestly: tell the operator via Telegram instead
+  of silently falling back to dumber behavior.
 
 ### 3. LinkedIn Account Safety
 
@@ -249,9 +258,6 @@ Meeting ask by location:
 Escalate instead of drafting when the prospect asks about pricing, contracts,
 refunds, SLAs, data/privacy, security, or anything commercially binding.
 
-Escalate instead of drafting when the prospect asks about pricing, contracts,
-refunds, SLAs, data/privacy, security, or anything commercially binding.
-
 Prospect-fit check before drafting:
 
 - Search LinkedIn by name first, then inspect results for company/headline fit.
@@ -396,23 +402,22 @@ These apply in every context, every time, without exception.
 
 ## Product Workflow
 
-### Current v1 Direction
+### Current Direction
 
-The operator should stay close to research and drafting. The 10am automation
-surfaces prospects only. Research synthesis and message drafting happen when
-the operator is present in Claude Code.
+The operator runs the whole thing from Telegram in natural language; the bot
+is a conversational Claude agent with memory and tools (queue, redraft, skip,
+prepare-send, prospecting, research, booking, health check).
 
 Daily flow:
 
-1. Surface candidates from the BNI list and hashtag stream.
-2. Enrich selected candidates with LinkedIn URLs.
-3. Score/rank using cheap signals.
-4. Write the day's queue locally.
-5. Notify Telegram that the queue is ready.
-6. When the operator is present, Claude Code gathers research and drafts.
-7. Telegram approval gates every send.
-
-No LLM call belongs in the scheduled surfacing job.
+1. Operator asks the bot to prospect ("find me new leads") — the pipeline
+   searches the BNI list, finds/validates LinkedIn profiles, researches them,
+   and drafts openers (`prospecting_pipeline.py`).
+2. Drafts wait in the queue. Operator reviews/redrafts/edits via chat.
+3. Every send needs a confirmation button tap.
+4. `poll-inbox` (cron, weekday business hours) reads replies, auto-answers
+   normal ones on a schedule, and escalates edge cases to Telegram.
+5. Daily 5pm report summarises leads, conversations, and meetings.
 
 ### Conversation Rules
 
@@ -428,8 +433,10 @@ No LLM call belongs in the scheduled surfacing job.
 
 Reply handling:
 
-- Detect inbound messages without LLM drafting.
-- Apply a varied humanlike delay before surfacing the reply for drafting.
+- Classify inbound messages with cheap rules first (`classifier.py`); only
+  normal messages reach the LLM drafter.
+- Auto-replies are scheduled with a varied humanlike delay (`send_after`),
+  never sent instantly.
 - Respect Malaysia business hours (UTC+8).
 - Escalate ambiguous/commercial/sensitive messages instead of drafting.
 
@@ -512,9 +519,8 @@ Do not implement live sending until all of these exist:
 
 Stop and explain the risk before proceeding if a request would:
 
-- Auto-send or bypass Telegram approval
-- Add API-backed or background LLM drafting
-- Add `ANTHROPIC_API_KEY` or another LLM provider
+- Auto-send openers/connection requests or bypass the Telegram confirmation button
+- Add another LLM provider, or remove the iteration caps on agent loops
 - Increase LinkedIn volume beyond conservative caps
 - Store credentials insecurely
 - Use a cloud/shared browser session
