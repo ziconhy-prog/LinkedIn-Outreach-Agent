@@ -18,10 +18,18 @@ def run() -> None:
         _add_redraft_columns(conn)
         _add_auto_reply_columns(conn)
         _add_pending_meeting_columns(conn)
+        _add_send_after_column(conn)
         _convert_posts_to_activity(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _add_send_after_column(conn) -> None:
+    """Schedule auto-replies instead of blocking the process with sleep()."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    if "send_after" not in existing:
+        conn.execute("ALTER TABLE messages ADD COLUMN send_after TEXT")
 
 
 def _add_pending_meeting_columns(conn) -> None:

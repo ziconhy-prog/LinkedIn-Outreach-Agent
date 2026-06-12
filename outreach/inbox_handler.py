@@ -7,8 +7,13 @@ Flow:
      a. Store it as an inbound message row.
      b. Classify (normal / pricing / not_interested / aggressive / meeting_request).
      c. Escalate: set needs_attention, notify Telegram, skip auto-draft.
-     d. Normal: draft reply via Claude API, store as auto_draft, wait humanlike
-        delay, send via Playwright, mark sent.
+     d. Normal: draft reply via Claude API, store as auto_draft with a
+        humanlike ``send_after`` delay, then send via Playwright once due.
+
+Auto-replies are scheduled (messages.send_after) rather than slept on, so the
+cycle never blocks for long and replies left over from a crashed/expired run
+are sent at the start of the next one. A lock file prevents overlapping cycles
+from double-sending.
 
 Only the opener requires Telegram approval. All subsequent normal replies are
 sent automatically. Edge cases always escalate to Zico.
@@ -16,12 +21,13 @@ sent automatically. Edge cases always escalate to Zico.
 
 from __future__ import annotations
 
-import json
+import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from outreach import audit, calendar_client, classifier, drafter, meeting_extractor
+from outreach.config import DATA_DIR
 from outreach.db.connection import get_connection
 from outreach.linkedin.inbox import poll_inbox
 from outreach.linkedin.send import SendError, send_message
@@ -29,9 +35,39 @@ from outreach.linkedin.session import check_session
 from outreach.telegram_client import send_operator_message as telegram_notify
 
 
-# Humanlike delay range in seconds before auto-sending (15–45 minutes).
-_DELAY_MIN_S = 15 * 60
-_DELAY_MAX_S = 45 * 60
+# Humanlike delay range in seconds before auto-sending a drafted reply.
+_DELAY_MIN_S = 4 * 60
+_DELAY_MAX_S = 12 * 60
+
+# How long the end-of-cycle flush waits for scheduled replies before leaving
+# the rest to the next cycle.
+_FLUSH_MAX_WAIT_S = 15 * 60
+
+_LOCK_PATH = DATA_DIR / "poll_inbox.lock"
+_LOCK_STALE_S = 45 * 60
+
+
+def _acquire_lock() -> bool:
+    """Best-effort cross-platform lock so two cycles can't run at once."""
+    try:
+        if _LOCK_PATH.exists():
+            age = time.time() - _LOCK_PATH.stat().st_mtime
+            if age < _LOCK_STALE_S:
+                return False
+            _LOCK_PATH.unlink()  # stale lock from a crashed run
+        fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except (FileExistsError, OSError):
+        return False
+
+
+def _release_lock() -> None:
+    try:
+        _LOCK_PATH.unlink()
+    except OSError:
+        pass
 
 
 def _fetch_active_threads() -> list[dict]:
@@ -106,22 +142,113 @@ def _store_inbound(thread_id: int, content: str) -> int:
         conn.close()
 
 
-def _store_auto_draft(thread_id: int, content: str) -> int:
-    """Store an auto-drafted outbound reply and return its ID."""
+def _store_auto_draft(thread_id: int, content: str, delay_s: int = 0) -> int:
+    """Store an auto-drafted outbound reply and return its ID.
+
+    ``delay_s`` > 0 schedules the send for later (humanlike delay) via the
+    ``send_after`` column; 0 means due immediately.
+    """
+    send_after = (datetime.now(timezone.utc) + timedelta(seconds=delay_s)).isoformat()
     conn = get_connection()
     try:
         cur = conn.execute(
             """
             INSERT INTO messages
-                (thread_id, direction, role, content, status, approved_via)
-            VALUES (?, 'outbound', 'reply', ?, 'auto_draft', 'auto')
+                (thread_id, direction, role, content, status, approved_via, send_after)
+            VALUES (?, 'outbound', 'reply', ?, 'auto_draft', 'auto', ?)
             """,
-            (thread_id, content),
+            (thread_id, content, send_after),
         )
         conn.commit()
         return cur.lastrowid
     finally:
         conn.close()
+
+
+def _send_due_replies(summary: dict) -> int:
+    """Send every auto_draft whose scheduled time has passed.
+
+    Each message is claimed atomically (auto_draft → approved) before the
+    browser send, so even overlapping processes can't double-send. Returns
+    how many auto_drafts are still waiting on their schedule.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_connection()
+    try:
+        due = conn.execute(
+            "SELECT id FROM messages WHERE status = 'auto_draft' "
+            "AND (send_after IS NULL OR send_after <= ?)",
+            (now_iso,),
+        ).fetchall()
+        remaining = conn.execute(
+            "SELECT count(*) FROM messages WHERE status = 'auto_draft' "
+            "AND send_after > ?",
+            (now_iso,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    for row in due:
+        msg_id = row["id"]
+        conn = get_connection()
+        try:
+            cur = conn.execute(
+                "UPDATE messages SET status = 'approved', "
+                "approved_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'auto_draft'",
+                (msg_id,),
+            )
+            conn.commit()
+            claimed = cur.rowcount > 0
+        finally:
+            conn.close()
+        if not claimed:
+            continue  # another process got it first
+
+        try:
+            send_message(msg_id)
+            summary["sent"] += 1
+            print(f"  ↳ Sent scheduled reply {msg_id}.")
+        except SendError as exc:
+            print(f"  ↳ Send failed for message {msg_id}: {exc}")
+            audit.log(
+                "inbox_send_error",
+                target=f"message:{msg_id}",
+                success=False,
+                error_message=str(exc),
+            )
+            summary["errors"] += 1
+            # Put it back on the schedule (1h later) so the next cycle retries.
+            retry_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            conn = get_connection()
+            try:
+                conn.execute(
+                    "UPDATE messages SET status = 'auto_draft', send_after = ? "
+                    "WHERE id = ? AND status = 'approved'",
+                    (retry_at, msg_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            _notify_operator(
+                f"⚠️ A scheduled LinkedIn reply (message {msg_id}) failed to send: {exc}\n"
+                "I'll retry in about an hour."
+            )
+
+    return remaining
+
+
+def _notify_operator(text: str) -> None:
+    """Telegram-notify the operator; log (never raise) if Telegram is down."""
+    try:
+        telegram_notify(text)
+    except Exception as exc:  # noqa: BLE001
+        audit.log(
+            "telegram_notify_failed",
+            target="operator",
+            success=False,
+            error_message=str(exc),
+        )
 
 
 def _escalate(thread_id: int, inbound_id: int, reason: str, content: str) -> None:
@@ -154,16 +281,14 @@ def _escalate(thread_id: int, inbound_id: int, reason: str, content: str) -> Non
         "aggressive": "Aggressive reply",
         "meeting_request": "Meeting request",
         "architecture_question": "Architecture / tech question — reply manually",
+        "meeting_location_unclear": "Meeting to book — couldn't read the location",
         "uncertain": "Uncertain — needs your review",
     }.get(reason, reason)
 
-    try:
-        telegram_notify(
-            f"⚠️ NEEDS YOU — {label}\n\nThread {thread_id}:\n\"{preview}\"\n\n"
-            f"Run /queue to review.",
-        )
-    except Exception:  # noqa: BLE001
-        pass  # Telegram notify failure shouldn't block inbox processing.
+    _notify_operator(
+        f"⚠️ NEEDS YOU — {label}\n\nThread {thread_id}:\n\"{preview}\"\n\n"
+        f"Reply on LinkedIn directly, or ask me about this prospect here.",
+    )
 
 
 def _handle_meeting_confirmed(
@@ -248,7 +373,7 @@ def _book_meeting_with_location(
             conn.close()
 
         time_str = start_dt.strftime("%A %d %B, %I:%M%p MYT")
-        telegram_notify(
+        _notify_operator(
             f"📅 Meeting booked!\n\n"
             f"{prospect_name} — {company}\n"
             f"{time_str}\n"
@@ -256,7 +381,7 @@ def _book_meeting_with_location(
             f"Calendar: {event_url}"
         )
     except Exception as exc:  # noqa: BLE001
-        telegram_notify(
+        _notify_operator(
             f"⚠️ Couldn't book {prospect_name}'s meeting: {exc}\n"
             f"Location given: {location}\nPlease book manually."
         )
@@ -273,17 +398,30 @@ def run_inbox_cycle(dry_run: bool = False) -> dict:
         "errors": 0,
     }
 
+    if not dry_run and not _acquire_lock():
+        print("Another poll-inbox run is already in progress — skipping this one.")
+        return summary
+
+    try:
+        return _run_inbox_cycle_locked(summary, dry_run)
+    finally:
+        if not dry_run:
+            _release_lock()
+
+
+def _run_inbox_cycle_locked(summary: dict, dry_run: bool) -> dict:
     # Session health check — abort if LinkedIn session is not logged in.
     if not check_session():
         print("❌ LinkedIn session is not active. Run `linkedin-login` to restore it.")
-        try:
-            telegram_notify(
-                "⚠️ poll-inbox aborted: LinkedIn session expired. "
-                "Run `linkedin-login` on your Mac to restore it."
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        _notify_operator(
+            "⚠️ poll-inbox aborted: LinkedIn session expired. "
+            "Run `linkedin-login` on your Mac to restore it."
+        )
         return summary
+
+    # First, send any replies scheduled by a previous run that are now due.
+    if not dry_run:
+        _send_due_replies(summary)
 
     active_threads = _fetch_active_threads()
     summary["threads_checked"] = len(active_threads)
@@ -308,12 +446,22 @@ def run_inbox_cycle(dry_run: bool = False) -> dict:
         # Store the inbound message.
         inbound_id = _store_inbound(thread_id, msg["content"])
 
-        # If thread is waiting for a location, treat this reply as the location.
+        # If thread is waiting for a location, parse it out of the reply
+        # (the message may contain more than just the venue).
         if thread_info.get("pending_meeting_at"):
-            location = msg["content"].strip()
-            _book_meeting_with_location(thread_id, location, thread_info, thread_info["pending_meeting_at"])
-            summary["escalated"] += 1
-            print(f"  ↳ Booked meeting for {thread_info['prospect_name']} at: {location}")
+            details = meeting_extractor.extract_meeting_details(msg["content"])
+            location = ((details or {}).get("location") or "").strip()
+            if location:
+                _book_meeting_with_location(thread_id, location, thread_info, thread_info["pending_meeting_at"])
+                summary["escalated"] += 1
+                print(f"  ↳ Booked meeting for {thread_info['prospect_name']} at: {location}")
+            else:
+                _escalate(thread_id, inbound_id, "meeting_location_unclear", msg["content"])
+                summary["escalated"] += 1
+                print(
+                    f"  ↳ Couldn't read a location from {thread_info['prospect_name']}'s "
+                    "reply — escalated."
+                )
             continue
 
         # Classify.
@@ -377,27 +525,24 @@ def run_inbox_cycle(dry_run: bool = False) -> dict:
         if dry_run:
             continue
 
-        # Store draft.
-        draft_id = _store_auto_draft(thread_id, reply_text)
-
-        # Humanlike delay.
+        # Store draft with a humanlike scheduled delay — no blocking sleep,
+        # so the next prospect's reply is drafted immediately.
         delay = random.randint(_DELAY_MIN_S, _DELAY_MAX_S)
-        print(f"  ↳ Waiting {delay // 60}m before sending…")
-        time.sleep(delay)
+        draft_id = _store_auto_draft(thread_id, reply_text, delay_s=delay)
+        print(f"  ↳ Scheduled message {draft_id} to send in ~{delay // 60}m.")
 
-        # Send.
-        try:
-            send_message(draft_id)
-            summary["sent"] += 1
-            print(f"  ↳ Sent message {draft_id}.")
-        except SendError as exc:
-            print(f"  ↳ Send failed for message {draft_id}: {exc}")
-            audit.log(
-                "inbox_send_error",
-                target=f"message:{draft_id}",
-                success=False,
-                error_message=str(exc),
-            )
-            summary["errors"] += 1
+    # Flush: wait (briefly, in small steps) for this run's scheduled replies
+    # and send them as they come due. Anything still pending is picked up at
+    # the start of the next cycle.
+    if not dry_run:
+        flush_start = time.monotonic()
+        while True:
+            remaining = _send_due_replies(summary)
+            if remaining == 0:
+                break
+            if time.monotonic() - flush_start > _FLUSH_MAX_WAIT_S:
+                print(f"  ↳ {remaining} scheduled repl(ies) left for the next cycle.")
+                break
+            time.sleep(20)
 
     return summary
